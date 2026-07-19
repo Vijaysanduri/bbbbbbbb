@@ -1,0 +1,196 @@
+// Dream2Fly — Prisma schema
+//
+// This models the slice of the full spec (section 33) that the Employee
+// Dashboard v1.0 prototype actually needs: users/roles, leads (applicants
+// pre-conversion), tasks, comments, follow-ups, and a global activity log
+// for the standup feed. Field names deliberately match the JS objects used
+// in employee-dashboard.html so the front-end swap is a straight mapping.
+//
+// Not yet modeled here (add when you build those portals/modules):
+// channel_partners, commissions, payroll, documents, agreements, invoices,
+// universities/courses/offers, visa_processes — see section 33 of the spec
+// for the full table list.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // SQLite for local development out of the box. Switch to "postgresql"
+  // and point DATABASE_URL at a real Postgres instance for production —
+  // see .env.example.
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  MANAGER
+  HR
+  FINANCE
+  COUNSELLOR
+  VISA_OFFICER
+  DOCUMENTATION_OFFICER
+  EMPLOYEE
+  CHANNEL_PARTNER
+  STUDENT
+}
+
+enum LeadStatus {
+  ENQUIRY_RECEIVED
+  DOCUMENTS_PENDING
+  UNDER_REVIEW
+  OFFER_RECEIVED
+  VISA_FILED
+  VISA_APPROVED
+  VISA_REFUSED
+  CONVERTED
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum LeadSource {
+  WEBSITE
+  COLLEGE
+  INSTAGRAM
+  FACEBOOK
+  REFERRAL
+  WALK_IN
+  OTHER
+}
+
+enum FollowUpType {
+  CALL
+  MESSAGE
+  EMAIL
+}
+
+model User {
+  id           String   @id @default(cuid())
+  fullName     String
+  email        String   @unique
+  phone        String?
+  passwordHash String
+  role         Role     @default(EMPLOYEE)
+  jobTitle     String?
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignedLeads Lead[]  @relation("AssignedEmployee")
+  assignedTasks Task[]  @relation("AssignedEmployee")
+  comments      Comment[]
+  activityLogs  ActivityLog[]
+  featureFlags  FeatureFlag[]
+}
+
+// Admin-controlled per-role feature toggles — backs the
+// "Employee Portal — Feature Controls" panel on the Admin dashboard.
+// scope = "EMPLOYEE" today; extend to other roles as those portals are built.
+model FeatureFlag {
+  id        String   @id @default(cuid())
+  scope     Role     @default(EMPLOYEE)
+  key       String   // e.g. "excelUpload", "aiAssistant", "convertToTask"
+  enabled   Boolean  @default(true)
+  updatedBy String?
+  updatedByUser User? @relation(fields: [updatedBy], references: [id])
+  updatedAt DateTime @updatedAt
+
+  @@unique([scope, key])
+}
+
+model Lead {
+  id          String     @id @default(cuid())
+  name        String
+  country     String
+  service     String
+  source      LeadSource @default(OTHER)
+  status      LeadStatus @default(ENQUIRY_RECEIVED)
+  dateAdded   DateTime   @default(now())
+  convertedAt DateTime?
+
+  assignedEmployeeId String?
+  assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
+
+  history    LeadHistoryEntry[]
+  followUps  FollowUp[]
+  comments   Comment[]
+  convertedToTask Task? @relation("ConvertedFrom")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model LeadHistoryEntry {
+  id     String     @id @default(cuid())
+  leadId String
+  lead   Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  stage  LeadStatus
+  date   DateTime   @default(now())
+}
+
+model FollowUp {
+  id     String       @id @default(cuid())
+  leadId String
+  lead   Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  type   FollowUpType
+  note   String
+  date   DateTime     @default(now())
+}
+
+model Task {
+  id       String     @id @default(cuid())
+  title    String
+  related  String     // candidate/partner name this task is about
+  country  String
+  due      DateTime
+  priority Priority   @default(MEDIUM)
+  status   TaskStatus @default(PENDING)
+
+  assignedEmployeeId String?
+  assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
+
+  convertedFromLeadId String? @unique
+  convertedFromLead   Lead?   @relation("ConvertedFrom", fields: [convertedFromLeadId], references: [id])
+
+  comments Comment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// One comment model shared by leads and tasks (exactly one of leadId/taskId set).
+model Comment {
+  id        String   @id @default(cuid())
+  text      String
+  isSystem  Boolean  @default(false)
+  authorId  String?
+  author    User?    @relation(fields: [authorId], references: [id])
+  leadId    String?
+  lead      Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  taskId    String?
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+// Powers the "Recent candidate activity" standup feed.
+model ActivityLog {
+  id        String   @id @default(cuid())
+  text      String
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  createdAt DateTime @default(now())
+}
