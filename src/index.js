@@ -1,11 +1,17 @@
 require('dotenv').config();
 const express = require('express');
+require('express-async-errors');
 const cors = require('cors');
 
 const authRoutes = require('./routes/auth.routes');
 const leadsRoutes = require('./routes/leads.routes');
 const tasksRoutes = require('./routes/tasks.routes');
 const featureFlagsRoutes = require('./routes/featureFlags.routes');
+const attendanceRoutes = require('./routes/attendance.routes');
+const leavesRoutes = require('./routes/leaves.routes');
+const infoDocumentsRoutes = require('./routes/infoDocuments.routes');
+const payslipsRoutes = require('./routes/payslips.routes');
+const siteContentRoutes = require('./routes/siteContent.routes');
 
 const app = express();
 
@@ -28,6 +34,11 @@ app.use('/api/auth', authRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/feature-flags', featureFlagsRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/leaves', leavesRoutes);
+app.use('/api/info-documents', infoDocumentsRoutes);
+app.use('/api/payslips', payslipsRoutes);
+app.use('/api/site-content', siteContentRoutes);
 
 // Centralized error handler — keeps stack traces out of API responses.
 app.use((err, req, res, next) => {
