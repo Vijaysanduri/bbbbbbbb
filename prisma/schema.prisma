@@ -19,7 +19,7 @@ datasource db {
   // SQLite for local development out of the box. Switch to "postgresql"
   // and point DATABASE_URL at a real Postgres instance for production —
   // see .env.example.
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -62,6 +62,22 @@ enum Priority {
   HIGH
 }
 
+enum TaskStage {
+  DOC_CHECKLIST_SENT
+  WAITING_FOR_DOCUMENTS
+  DOCUMENTS_RECEIVED
+  SUBMITTED_TO_UNIVERSITY
+  WAITING_UNIVERSITY_RESPONSE
+  PENDING_FROM_CANDIDATE
+  PENDING_FROM_CLIENT
+  PENDING_FROM_UNIVERSITY
+  INTERVIEW_STAGE
+  LOAN_STAGE
+  VISA_STAGE
+  VISA_APPROVED
+  COMPLETED
+}
+
 enum LeadSource {
   WEBSITE
   COLLEGE
@@ -76,6 +92,19 @@ enum FollowUpType {
   CALL
   MESSAGE
   EMAIL
+}
+
+enum CallTag {
+  NOT_CALLED_YET
+  CALL_BACK_TODAY
+  CALL_BACK_TOMORROW
+  CALL_BACK_LATER
+  NOT_RESPONDED
+  INTERESTED
+  CONFIRMED
+  NOT_INTERESTED
+  WRONG_NUMBER
+  BUSY_TRY_AGAIN
 }
 
 model User {
@@ -95,6 +124,12 @@ model User {
   comments      Comment[]
   activityLogs  ActivityLog[]
   featureFlags  FeatureFlag[]
+  attendance    Attendance[]
+  leaveRequests LeaveRequest[]
+  loggedFollowUps FollowUp[] @relation("FollowUpLogger")
+  uploadedDocuments InfoDocument[]
+  payslips Payslip[] @relation("PayslipOwner")
+  uploadedPayslips Payslip[] @relation("PayslipUploader")
 }
 
 // Admin-controlled per-role feature toggles — backs the
@@ -122,6 +157,18 @@ model Lead {
   dateAdded   DateTime   @default(now())
   convertedAt DateTime?
 
+  // Contact details — carried over automatically to the Task when this
+  // lead is converted, so the WhatsApp/Email quick-send buttons work
+  // immediately without re-entering anything.
+  contactPhone String?
+  contactEmail String?
+
+  // Call-outcome tracking — set every time an employee logs a follow-up,
+  // so leads can be filtered by "what happened last time we called them"
+  // rather than only their pipeline status.
+  currentTag     CallTag?
+  nextFollowUpAt DateTime?
+
   assignedEmployeeId String?
   assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
 
@@ -147,8 +194,12 @@ model FollowUp {
   leadId String
   lead   Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
   type   FollowUpType
+  tag    CallTag?
   note   String
   date   DateTime     @default(now())
+
+  loggedById String?
+  loggedBy   User?    @relation("FollowUpLogger", fields: [loggedById], references: [id])
 }
 
 model Task {
@@ -159,6 +210,23 @@ model Task {
   due      DateTime
   priority Priority   @default(MEDIUM)
   status   TaskStatus @default(PENDING)
+
+  // Contact details for the candidate this task is about — powers the
+  // WhatsApp/Email quick-send buttons on the job card.
+  contactPhone String?
+  contactEmail String?
+
+  // Post-conversion pipeline stage (document checklist, university
+  // submission, interview, loan, visa, etc.) — separate from `status`,
+  // which is the generic Pending/In Progress/Completed/Overdue/Cancelled
+  // task-management state. `stage` is what a senior colleague needs to
+  // see at a glance to understand exactly where this case really stands.
+  // A single, always-current summary the employee updates directly —
+  // deliberately separate from the comment thread. Reading this tells you
+  // where things stand right now without scrolling through history.
+  overview String? @db.Text
+
+  stage TaskStage?
 
   assignedEmployeeId String?
   assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
@@ -173,10 +241,16 @@ model Task {
 }
 
 // One comment model shared by leads and tasks (exactly one of leadId/taskId set).
+enum CommentChannel {
+  INTERNAL         // visible only to staff — the "KC Team" style tab
+  CANDIDATE_FACING // meant to reach the candidate — attempts a real email when posted
+}
+
 model Comment {
-  id        String   @id @default(cuid())
+  id        String         @id @default(cuid())
   text      String
-  isSystem  Boolean  @default(false)
+  isSystem  Boolean        @default(false)
+  channel   CommentChannel @default(INTERNAL)
   authorId  String?
   author    User?    @relation(fields: [authorId], references: [id])
   leadId    String?
@@ -184,6 +258,14 @@ model Comment {
   taskId    String?
   task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
+
+  // Basic attachment support: stored as a data URL (base64) rather than
+  // a real file storage bucket, since no S3/Cloudinary is wired up yet.
+  // Fine for small files (a scanned document, a screenshot); anything
+  // large should wait for real file storage — flagging this honestly
+  // rather than pretending it scales.
+  attachmentUrl  String? @db.Text
+  attachmentName String?
 }
 
 // Powers the "Recent candidate activity" standup feed.
@@ -193,4 +275,92 @@ model ActivityLog {
   actorId   String?
   actor     User?    @relation(fields: [actorId], references: [id])
   createdAt DateTime @default(now())
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  WORK_FROM_HOME
+  ON_LEAVE
+  HOLIDAY
+}
+
+enum LeaveType {
+  SICK
+  CASUAL
+  EARNED
+  UNPAID
+  OTHER
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model Attendance {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  date      DateTime         @default(now())
+  clockIn   DateTime?
+  clockOut  DateTime?
+  status    AttendanceStatus @default(PRESENT)
+  createdAt DateTime         @default(now())
+}
+
+model LeaveRequest {
+  id         String      @id @default(cuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id])
+  leaveType  LeaveType   @default(CASUAL)
+  fromDate   DateTime
+  toDate     DateTime
+  reason     String
+  status     LeaveStatus @default(PENDING)
+  appliedAt  DateTime    @default(now())
+  decidedAt  DateTime?
+}
+
+// Admin-uploaded payslips per employee, per month.
+model Payslip {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation("PayslipOwner", fields: [userId], references: [id])
+  month        String   // e.g. "2026-07"
+  fileName     String
+  mimeType     String
+  fileData     String   @db.Text
+  uploadedById String?
+  uploadedBy   User?    @relation("PayslipUploader", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+}
+
+// Admin-managed reference documents (checklists, templates, etc.) shown in
+// Employee's "Information Material" tab. Only Admin/Super Admin can upload
+// or delete — everyone else can view/download/send only.
+// Admin-editable website content (homepage text + images) — a single row
+// storing a JSON blob, so any field can be added/edited from the Admin
+// dashboard without needing a schema change or code deploy for every new
+// field. The public website fetches this (no auth) on page load and uses
+// it to override its hardcoded defaults.
+model SiteContent {
+  id        String   @id @default("main")
+  dataJson  String   @db.Text
+  updatedAt DateTime @updatedAt
+}
+
+model InfoDocument {
+  id           String   @id @default(cuid())
+  title        String
+  category     String   // e.g. "Checklist", "Template", "Guide"
+  fileName     String
+  mimeType     String
+  fileData     String   @db.Text // base64 — see note on Comment.attachmentUrl re: real file storage
+  uploadedById String?
+  uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
 }
