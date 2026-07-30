@@ -19,7 +19,7 @@ datasource db {
   // SQLite for local development out of the box. Switch to "postgresql"
   // and point DATABASE_URL at a real Postgres instance for production —
   // see .env.example.
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
