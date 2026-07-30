@@ -1,6 +1,5 @@
 // Dream2Fly — Prisma schema
 //
-<!-- redeploy trigger -->
 // This models the slice of the full spec (section 33) that the Employee
 // Dashboard v1.0 prototype actually needs: users/roles, leads (applicants
 // pre-conversion), tasks, comments, follow-ups, and a global activity log
