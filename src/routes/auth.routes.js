@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -65,6 +65,17 @@ router.post('/change-password', requireAuth, async (req, res) => {
   const passwordHash = await bcrypt.hash(newPassword, 10);
   await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
   res.json({ success: true, message: 'Password updated. Please sign in again on other devices.' });
+});
+
+// GET /api/auth/employees — Admin/Super Admin only. Used for dropdowns
+// (payslip upload, asset assignment, etc.) — not a general user directory.
+router.get('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const employees = await prisma.user.findMany({
+    where: { active: true },
+    select: { id: true, fullName: true, email: true, role: true },
+    orderBy: { fullName: 'asc' },
+  });
+  res.json(employees);
 });
 
 module.exports = router;
