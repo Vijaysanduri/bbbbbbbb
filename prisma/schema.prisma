@@ -107,17 +107,114 @@ enum CallTag {
   BUSY_TRY_AGAIN
 }
 
+// The three physical offices. Real visibility boundary planned: most
+// roles will only see data tied to their own branch; Admin/Super Admin
+// see everything, always, regardless of branch. PAUSED MID-BUILD — see
+// PROJECT-STATE.md for what's done and what's still needed before this
+// is usable (branchId still needs adding to Lead/Task/Asset/Expense, plus
+// all the actual visibility-scoping logic in every relevant route, plus
+// frontend branch filters and a way to assign someone's branch).
+// A record of a bulk email/WhatsApp campaign that was sent — kept for
+// audit/history ("what did we send, when, to how many people"), not for
+// managing an ongoing subscriber list.
+model Promotion {
+  id              String   @id @default(cuid())
+  subject         String
+  body            String   @db.Text
+  recipientSource String   // "LEADS" | "UPLOAD"
+  recipientCount  Int
+  emailsSent      Int      @default(0)
+  whatsappSent    Int      @default(0)
+  sentById        String?
+  sentBy          User?    @relation(fields: [sentById], references: [id])
+  createdAt       DateTime @default(now())
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+// A fee a student owes (process fee, application fee, etc.), created by
+// staff, paid by the student through Razorpay. Kept even after payment
+// as the permanent receipt/audit record.
+model Payment {
+  id                 String        @id @default(cuid())
+  studentId          String
+  student            User          @relation("StudentPayments", fields: [studentId], references: [id])
+  purpose            String        // e.g. "Process Fee", "Application Fee"
+  amount             Float         // in INR
+  status             PaymentStatus @default(PENDING)
+  razorpayOrderId    String?
+  razorpayPaymentId  String?
+  razorpaySignature  String?
+  requestedById      String?
+  requestedBy        User?         @relation("StaffPaymentRequests", fields: [requestedById], references: [id])
+  createdAt          DateTime      @default(now())
+  paidAt             DateTime?
+}
+
+// A per-user in-app alert — task/lead assignments, documents needing
+// attention, payments, company announcements. Separate from email: this
+// is what actually populates the bell icon, which previously had nothing
+// behind it at all.
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  body      String?
+  type      String   @default("GENERAL") // "TASK_ASSIGNED" | "LEAD_ASSIGNED" | "DOCUMENT" | "PAYMENT" | "ANNOUNCEMENT" | "GENERAL"
+  link      String?  // which dashboard view this should take them to, e.g. "tasks"
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  name      String   @unique // "Hyderabad" | "Vijayawada" | "London"
+  address   String?
+  createdAt DateTime @default(now())
+  users     User[]
+}
+
 model User {
   id           String   @id @default(cuid())
   fullName     String
   email        String   @unique
   phone        String?
+  profilePhotoData     String? @db.Text // base64 — a real uploaded photo, not a stock placeholder
+  profilePhotoMimeType String?
   passwordHash String
   role         Role     @default(EMPLOYEE)
   jobTitle     String?
+  // Monthly base salary — set by Admin/HR, used as the input for
+  // attendance-based payroll calculation. Kept simple (a single flat
+  // monthly figure) rather than a full pay-structure model with
+  // allowances/deductions — that's a bigger feature than what's built here.
+  baseSalary   Float?
   active       Boolean  @default(true)
+  country      String?  // relevant for STUDENT role — which destination their checklist should show
+  branchId     String?
+  branch       Branch?  @relation(fields: [branchId], references: [id])
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  // Per-person feature grants — Admin can give any individual (regardless
+  // of role) access to specific Admin-dashboard features, independent of
+  // their role. Checked fresh from the DB on every request (not cached in
+  // the JWT), so revoking access takes effect immediately, not just at
+  // next login.
+  canAccessResignationsAdmin Boolean @default(false)
+  canAccessEmployee360       Boolean @default(false)
+
+  // Reporting structure — foundation for approval routing (leave,
+  // attendance, payroll sign-off) and for showing "who's my manager/HR"
+  // on the Employee dashboard.
+  reportingManagerId String?
+  reportingManager   User?   @relation("ReportingManager", fields: [reportingManagerId], references: [id])
+  directReports      User[]  @relation("ReportingManager")
 
   assignedLeads Lead[]  @relation("AssignedEmployee")
   assignedTasks Task[]  @relation("AssignedEmployee")
@@ -130,6 +227,39 @@ model User {
   uploadedDocuments InfoDocument[]
   payslips Payslip[] @relation("PayslipOwner")
   uploadedPayslips Payslip[] @relation("PayslipUploader")
+  createdHolidays Holiday[]
+  finalizedPayrollPeriods PayrollPeriod[]
+  ownedAssetAssignments   AssetAssignment[] @relation("AssetOwner")
+  assignedAssetAssignments AssetAssignment[] @relation("AssetAssigner")
+  createdSignableDocuments SignableDocument[]
+  signableDocumentAcks     SignableDocumentAck[]
+  personalNotes            PersonalNote[]
+  partnerReferredLeads     Lead[]         @relation("PartnerReferral")
+  partnerReferredTasks     Task[]         @relation("PartnerReferredTasks")
+  commissions              Commission[]   @relation("PartnerCommissions")
+  invoices                 Invoice[]      @relation("PartnerInvoices")
+  createdPartnerDocRequirements PartnerDocRequirement[] @relation("PartnerDocRequirementCreator")
+  partnerDocSubmissions          PartnerDocSubmission[] @relation("PartnerDocSubmitter")
+  reviewedPartnerDocSubmissions  PartnerDocSubmission[] @relation("PartnerDocReviewer")
+  createdStudentDocRequirements  StudentDocRequirement[] @relation("StudentDocRequirementCreator")
+  studentDocSubmissions          StudentDocSubmission[] @relation("StudentDocSubmitter")
+  reviewedStudentDocSubmissions  StudentDocSubmission[] @relation("StudentDocReviewer")
+  ownTasks                       Task[] @relation("StudentOwnTasks")
+  sentPromotions                 Promotion[]
+  payments                       Payment[] @relation("StudentPayments")
+  requestedPayments              Payment[] @relation("StaffPaymentRequests")
+  notifications                  Notification[]
+  resignations              Resignation[] @relation("ResigningEmployee")
+  reviewedResignations      Resignation[] @relation("ResignationReviewer")
+  clearedResignationAssets  Resignation[] @relation("ResignationAssetClearer")
+  submittedExpenses        Expense[]      @relation("ExpenseSubmitter")
+  reviewedExpenses         Expense[]      @relation("ExpenseReviewer")
+  expenseSharesReceived    ExpenseShare[] @relation("ExpenseSharedWith")
+  expenseSharesGranted     ExpenseShare[] @relation("ExpenseSharer")
+  chatChannelMemberships   ChatChannelMember[]
+  chatMessages             ChatMessage[]
+  fundTransactionsRequested ExpenseFundTransaction[] @relation("FundRequester")
+  fundTransactionsReviewed  ExpenseFundTransaction[] @relation("FundReviewer")
 }
 
 // Admin-controlled per-role feature toggles — backs the
@@ -162,12 +292,29 @@ model Lead {
   // immediately without re-entering anything.
   contactPhone String?
   contactEmail String?
+  whatsappNumber String?
+  resumeFileData String? @db.Text
+  resumeFileName String?
+
+  // Who actually referred this candidate — set once at creation and never
+  // changed, unlike assignedEmployeeId which moves freely as the lead gets
+  // reassigned to whichever employee is actually working it. This is how
+  // Admin/Employee can always see the original Channel Partner even after
+  // the lead has been handed to a real employee.
+  referredByPartnerId String?
+  referredByPartner   User?   @relation("PartnerReferral", fields: [referredByPartnerId], references: [id])
 
   // Call-outcome tracking — set every time an employee logs a follow-up,
   // so leads can be filtered by "what happened last time we called them"
   // rather than only their pipeline status.
   currentTag     CallTag?
   nextFollowUpAt DateTime?
+
+  // SLA tracking — powers the 30-minute assignment/contact alerts and the
+  // daily "no progress" standup list.
+  assignedAt          DateTime?  // when assignedEmployeeId was last set
+  unassignedAlertSent Boolean    @default(false)
+  contactAlertSent    Boolean    @default(false)
 
   assignedEmployeeId String?
   assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
@@ -203,7 +350,8 @@ model FollowUp {
 }
 
 model Task {
-  id       String     @id @default(cuid())
+  id         String     @id @default(cuid())
+  taskNumber Int        @unique @default(autoincrement()) // stable reference, e.g. displayed as "TSK-0001" — never reused even if a task is deleted
   title    String
   related  String     // candidate/partner name this task is about
   country  String
@@ -216,6 +364,19 @@ model Task {
   contactPhone String?
   contactEmail String?
 
+  // Carried over from the originating Lead on conversion, if this
+  // candidate came from a Channel Partner referral.
+  referredByPartnerId String?
+  referredByPartner   User?   @relation("PartnerReferredTasks", fields: [referredByPartnerId], references: [id])
+
+  // Links this case to the candidate's own Student portal login, if they
+  // have one — without this, a Student account has no way to know which
+  // task is theirs. Set manually by staff (search by email, link or
+  // create the account) since a Lead's contact email isn't guaranteed to
+  // match a real login until the student actually signs up.
+  studentId String?
+  student   User?   @relation("StudentOwnTasks", fields: [studentId], references: [id])
+
   // Post-conversion pipeline stage (document checklist, university
   // submission, interview, loan, visa, etc.) — separate from `status`,
   // which is the generic Pending/In Progress/Completed/Overdue/Cancelled
@@ -224,7 +385,19 @@ model Task {
   // A single, always-current summary the employee updates directly —
   // deliberately separate from the comment thread. Reading this tells you
   // where things stand right now without scrolling through history.
+  // Structured overview — the specific details a colleague needs at a
+  // glance without reading through comments: which course, which college,
+  // what the fees are. `overview` remains for anything else that doesn't
+  // fit these three fields.
+  course  String?
+  college String?
+  fees    String?
   overview String? @db.Text
+
+  // Separate from Overview — a dedicated place to log interview-specific
+  // details (questions asked, interviewer feedback, outcome) once a case
+  // reaches the interview stage, without mixing it into the general status summary.
+  interviewNotes String? @db.Text
 
   stage TaskStage?
 
@@ -325,6 +498,472 @@ model LeaveRequest {
   decidedAt  DateTime?
 }
 
+// Company holiday calendar — Admin/HR editable, visible to every employee.
+// Used both for display and to exclude holidays from "working days" when
+// calculating payroll.
+model Holiday {
+  id          String   @id @default(cuid())
+  date        DateTime
+  name        String
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+}
+
+enum AssetStatus {
+  AVAILABLE
+  ASSIGNED
+  RETIRED
+}
+
+enum AssetAssignmentStatus {
+  ACTIVE
+  RETURNED
+  REPLACEMENT_REQUESTED
+}
+
+// Admin defines which extra fields exist company-wide (e.g. "Serial Number",
+// "Warranty Expiry") without needing a schema change each time — values are
+// then stored per-asset in Asset.customFieldsJson, keyed by this field's id.
+model AssetFieldDefinition {
+  id        String   @id @default(cuid())
+  label     String   // e.g. "Serial Number"
+  createdAt DateTime @default(now())
+}
+
+model Asset {
+  id             String       @id @default(cuid())
+  name           String       // e.g. "Dell Latitude 5420"
+  category       String       // e.g. "Laptop", "Phone", "ID Card"
+  status         AssetStatus  @default(AVAILABLE)
+  customFieldsJson String?    @db.Text // JSON: { [fieldDefinitionId]: value }
+  createdAt      DateTime     @default(now())
+  assignments    AssetAssignment[]
+}
+
+// One row per assignment of an asset to an employee. Carries its own
+// agreement — either a typed-name "digital signature" captured with a
+// timestamp, or an uploaded scanned signed document — so each assignment
+// has its paperwork attached directly, visible from the employee's profile.
+model AssetAssignment {
+  id            String                 @id @default(cuid())
+  assetId       String
+  asset         Asset                  @relation(fields: [assetId], references: [id])
+  userId        String
+  user          User                   @relation("AssetOwner", fields: [userId], references: [id])
+  assignedById  String?
+  assignedBy    User?                  @relation("AssetAssigner", fields: [assignedById], references: [id])
+  assignedAt    DateTime               @default(now())
+  returnedAt    DateTime?
+  status        AssetAssignmentStatus  @default(ACTIVE)
+
+  // Agreement — exactly one of these two paths gets used:
+  signedByTypedName String?  // "digital signature": employee types their full legal name to accept
+  signedAt          DateTime?
+  uploadedAgreementFileData String? @db.Text // base64, if a scanned signed doc was uploaded instead
+  uploadedAgreementFileName String?
+  uploadedAgreementAt DateTime?
+
+  // Employee's periodic self-report on this asset.
+  reportNote      String?   @db.Text
+  reportType      String?   // "STILL_HAVE_IT" | "NEEDS_REPLACEMENT"
+  reportedAt      DateTime?
+}
+
+enum PayrollStatus {
+  OPEN
+  FINALIZED
+}
+
+// One row per calendar month. While OPEN, Admin/HR can preview the
+// attendance-based calculation for every employee. Clicking "Finalize"
+// locks it, generates every employee's Payslip for that month, and emails
+// each one their branded PDF. A finalized month is not reopened — a
+// miscalculation is corrected via a dispute note, resolved in the
+// following month's payroll, not by editing the past one.
+model PayrollPeriod {
+  id           String        @id @default(cuid())
+  month        String        @unique // e.g. "2026-07"
+  status       PayrollStatus @default(OPEN)
+  finalizedAt  DateTime?
+  finalizedById String?
+  finalizedBy  User?         @relation(fields: [finalizedById], references: [id])
+  payslips     Payslip[]
+}
+
+// Private scratchpad notes — visible only to the person who wrote them,
+// available from every dashboard (Admin, Employee, Partner, Student) so
+// anyone can jot down details without it being a "real" record tied to a
+// lead/task (those already have Comments for that).
+model PersonalNote {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Prevents the daily standup digest email from being sent more than once
+// on the same day (the in-process scheduler checks every few minutes).
+enum ExpenseStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Covers two distinct flows under one model:
+// 1) EMPLOYEE_CLAIM — an employee submits a work-related expense for
+//    reimbursement, with their bank details so Finance knows where to
+//    deposit it once approved.
+// 2) COMPANY_EXPENSE — Admin/HR directly records money the company itself
+//    paid out (e.g. "paid an interior worker for office setup") — who was
+//    paid, which company account/cash it came from, and the payment mode,
+//    so office spending is fully tracked even when there's no employee
+//    reimbursement involved.
+// Tracks money given to HR/Admin for office expenses, separate from
+// reimbursement claims. ALLOCATION rows (Admin adding funds directly) are
+// always APPROVED immediately; REQUEST rows (HR asking for more once the
+// balance runs low) start PENDING until Admin decides. Current Balance is
+// computed as SUM(approved allocations/requests) minus SUM(company
+// expenses recorded) — not stored directly, always derived fresh so it
+// can never drift out of sync with the underlying transactions.
+model ExpenseFundTransaction {
+  id            String        @id @default(cuid())
+  type          String        // "ALLOCATION" | "REQUEST"
+  amount        Float
+  status        ExpenseStatus @default(PENDING)
+  requestedById String
+  requestedBy   User          @relation("FundRequester", fields: [requestedById], references: [id])
+  reviewedById  String?
+  reviewedBy    User?         @relation("FundReviewer", fields: [reviewedById], references: [id])
+  reviewedAt    DateTime?
+  notes         String?
+  createdAt     DateTime      @default(now())
+}
+
+model Expense {
+  id             String        @id @default(cuid())
+  expenseType    String        @default("EMPLOYEE_CLAIM") // "EMPLOYEE_CLAIM" | "COMPANY_EXPENSE"
+  submittedById  String
+  submittedBy    User          @relation("ExpenseSubmitter", fields: [submittedById], references: [id])
+  amount         Float
+  category       String
+  description    String?       @db.Text
+  receiptFileName String?
+  receiptMimeType String?
+  receiptFileData String?      @db.Text
+  status         ExpenseStatus @default(PENDING)
+  reviewedById   String?
+  reviewedBy     User?         @relation("ExpenseReviewer", fields: [reviewedById], references: [id])
+  reviewedAt     DateTime?
+  reviewNotes    String?
+  createdAt      DateTime      @default(now())
+  shares         ExpenseShare[]
+
+  // EMPLOYEE_CLAIM only — where to deposit the reimbursement once approved.
+  bankAccountDetails String? @db.Text
+
+  // COMPANY_EXPENSE only — who was paid, from which account, and how.
+  paidTo           String?
+  paidFromAccount  String?
+  paymentMode      String? // "CASH" | "BANK_TRANSFER" | "UPI" | "CHEQUE" | "CARD" | "OTHER"
+}
+
+// One row per person Admin has granted visibility into a specific
+// expense — deliberately per-record, not a role or blanket permission.
+model ExpenseShare {
+  id           String   @id @default(cuid())
+  expenseId    String
+  expense      Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User     @relation("ExpenseSharedWith", fields: [userId], references: [id])
+  sharedById   String?
+  sharedBy     User?    @relation("ExpenseSharer", fields: [sharedById], references: [id])
+  sharedAt     DateTime @default(now())
+
+  @@unique([expenseId, userId])
+}
+
+enum CommissionStatus {
+  PENDING
+  APPROVED
+  PAID
+}
+
+// One row per commission owed to a partner for a specific converted lead.
+// Admin creates these manually once a referral converts — no automatic
+// calculation, since commission rules/percentages aren't modeled here.
+model Commission {
+  id        String           @id @default(cuid())
+  partnerId String
+  partner   User             @relation("PartnerCommissions", fields: [partnerId], references: [id])
+  leadName  String           // denormalized so it still reads fine if the lead is later deleted
+  amount    Float
+  status    CommissionStatus @default(PENDING)
+  notes     String?
+  createdAt DateTime         @default(now())
+}
+
+enum InvoiceStatus {
+  SUBMITTED
+  PAID
+  REJECTED
+}
+
+// Partner uploads their own invoice document; Admin marks it paid.
+model Invoice {
+  id            String        @id @default(cuid())
+  partnerId     String
+  partner       User          @relation("PartnerInvoices", fields: [partnerId], references: [id])
+  invoiceNumber String
+  amount        Float
+  description   String?
+  fileName      String
+  mimeType      String
+  fileData      String        @db.Text
+  status        InvoiceStatus @default(SUBMITTED)
+  createdAt     DateTime      @default(now())
+}
+
+// Admin defines which documents a Channel Partner needs to provide (e.g.
+// "Company Registration Certificate", "PAN Card", "Bank Proof"). This is
+// deliberately separate from SignableDocument — that's for agreements
+// needing a signature; this is for proof documents needing Admin's
+// approval/rejection instead.
+model PartnerDocRequirement {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  active      Boolean  @default(true)
+  createdById String?
+  createdBy   User?    @relation("PartnerDocRequirementCreator", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  submissions PartnerDocSubmission[]
+}
+
+// A checklist item for students applying to a specific destination — or
+// every destination, if country is left null (e.g. "Passport-size photo"
+// applies everywhere; "TB Test Certificate" only applies to UK).
+model StudentDocRequirement {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  active      Boolean  @default(true)
+  country     String?  // "UK" | "Canada" | "Australia" | "USA" | null = applies to everyone
+  createdById String?
+  createdBy   User?    @relation("StudentDocRequirementCreator", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  submissions StudentDocSubmission[]
+}
+
+enum ResignationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+// One row per resignation request. Approval sits with the employee's
+// reporting manager — "after discussion" is handled outside this system
+// (a call/meeting), with the manager recording the outcome here. On
+// approval, the in-process scheduler deactivates the account once the
+// last working day passes (see slaScheduler.js).
+model Resignation {
+  id                 String            @id @default(cuid())
+  userId             String
+  user               User              @relation("ResigningEmployee", fields: [userId], references: [id])
+  reason             String?           @db.Text
+  requestedAt        DateTime          @default(now())
+  proposedLastDay    DateTime
+  status             ResignationStatus @default(PENDING)
+  reviewedById       String?
+  reviewedBy         User?             @relation("ResignationReviewer", fields: [reviewedById], references: [id])
+  reviewedAt         DateTime?
+  managerNotes       String?
+  actualLastWorkingDay DateTime?
+  deactivatedAt      DateTime?
+
+  // Offboarding clearance — Admin/HR confirm company assets (laptop, ID
+  // card, etc.) have been returned before final dues can be released.
+  assetsCleared      Boolean   @default(false)
+  assetsClearedAt    DateTime?
+  assetsClearedById  String?
+  assetsClearedBy    User?     @relation("ResignationAssetClearer", fields: [assetsClearedById], references: [id])
+
+  // Final release — pending salary settlement + experience letter. Kept
+  // gated behind assetsCleared being true first (enforced in the route,
+  // not just the UI) so dues can't be released before assets are back.
+  financialClearance       Boolean   @default(false)
+  financialClearanceNotes  String?   @db.Text
+  financialClearanceAt     DateTime?
+  experienceLetterFileData String?   @db.Text
+  experienceLetterFileName String?
+  experienceLetterIssuedAt DateTime?
+}
+
+enum PartnerDocStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// One row per partner's upload against a specific requirement. A partner
+// can re-upload after a rejection — the latest submission per requirement
+// is what matters, tracked with its own review trail.
+model PartnerDocSubmission {
+  id             String            @id @default(cuid())
+  requirementId  String
+  requirement    PartnerDocRequirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  partnerId      String
+  partner        User              @relation("PartnerDocSubmitter", fields: [partnerId], references: [id])
+  fileName       String
+  mimeType       String
+  fileData       String            @db.Text
+  status         PartnerDocStatus  @default(PENDING)
+  reviewNotes    String?
+  reviewedById   String?
+  reviewedBy     User?             @relation("PartnerDocReviewer", fields: [reviewedById], references: [id])
+  submittedAt    DateTime          @default(now())
+  reviewedAt     DateTime?
+
+  @@unique([requirementId, partnerId])
+}
+
+enum StudentDocStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model StudentDocSubmission {
+  id             String            @id @default(cuid())
+  requirementId  String
+  requirement    StudentDocRequirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  studentId      String
+  student        User              @relation("StudentDocSubmitter", fields: [studentId], references: [id])
+  fileName       String
+  mimeType       String
+  fileData       String            @db.Text
+  status         StudentDocStatus  @default(PENDING)
+  reviewNotes    String?
+  reviewedById   String?
+  reviewedBy     User?             @relation("StudentDocReviewer", fields: [reviewedById], references: [id])
+  submittedAt    DateTime          @default(now())
+  reviewedAt     DateTime?
+
+  @@unique([requirementId, studentId])
+}
+
+// Singleton (always id "singleton") — global switches for what HR can
+// see by default. Unlike the per-person Admin Feature Access grants
+// (which start OFF and Admin turns ON for specific people), HR starts
+// with broad access to everything and Admin can turn OFF individual
+// confidential categories for the HR role as a whole. Super Admin/Admin
+// are never affected by this — they always see everything.
+model RoleCapabilitySettings {
+  id                          String  @id @default("singleton")
+  hrSeesPayroll               Boolean @default(true)
+  hrSeesResignations          Boolean @default(true)
+  hrSeesEmployee360           Boolean @default(true)
+  hrSeesExpenseFinancials     Boolean @default(true)
+  hrSeesConfidentialDocuments Boolean @default(true)
+  updatedAt                   DateTime @updatedAt
+}
+
+enum ChatChannelType {
+  GROUP
+  DIRECT
+}
+
+// A single company-wide "Company Chat" (GROUP, auto-created, everyone a
+// member) plus 1:1 DIRECT channels created automatically the first time
+// two people message each other — same pattern as Slack DMs, kept simple
+// since a full multi-group workspace is a much bigger feature than what's
+// needed here.
+model ChatChannel {
+  id        String          @id @default(cuid())
+  type      ChatChannelType
+  name      String?         // set for GROUP channels; null for DIRECT (name is derived from the other member)
+  createdAt DateTime        @default(now())
+  members   ChatChannelMember[]
+  messages  ChatMessage[]
+}
+
+model ChatChannelMember {
+  id            String      @id @default(cuid())
+  channelId     String
+  channel       ChatChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id])
+  lastReadAt    DateTime?
+  joinedAt      DateTime    @default(now())
+
+  @@unique([channelId, userId])
+}
+
+model ChatMessage {
+  id             String      @id @default(cuid())
+  channelId      String
+  channel        ChatChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User        @relation(fields: [senderId], references: [id])
+  text           String      @db.Text
+  attachmentUrl  String?
+  attachmentName String?
+  createdAt      DateTime    @default(now())
+}
+
+model DailyDigestLog {
+  id         String   @id @default(cuid())
+  digestDate String   @unique // "YYYY-MM-DD"
+  sentAt     DateTime @default(now())
+}
+
+// Covers both "Agreements" and "Onboarding Documents" — the same pattern
+// (a document that needs a signature from each employee) applies to both,
+// distinguished by `category`. Admin/HR uploads the template once; each
+// employee then either types their name to digitally sign, or uploads a
+// scanned physically-signed copy.
+model SignableDocument {
+  id            String   @id @default(cuid())
+  title         String
+  category      String   // "AGREEMENT" | "ONBOARDING"
+  active        Boolean  @default(true) // disabled documents stay visible to Admin for editing, but stop being assigned to new people and drop off the recipient's list
+  // Who this document applies to — reuses the same sign/upload/view
+  // infrastructure for both Employee agreements and Channel Partner
+  // agreements instead of building a second parallel system.
+  targetRole    String   @default("EMPLOYEE") // "EMPLOYEE" | "CHANNEL_PARTNER" | "ALL"
+  description   String?
+  fileName      String
+  mimeType      String
+  fileData      String   @db.Text
+  createdById   String?
+  createdBy     User?    @relation(fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  acknowledgments SignableDocumentAck[]
+}
+
+model SignableDocumentAck {
+  id                 String    @id @default(cuid())
+  documentId         String
+  document           SignableDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User      @relation(fields: [userId], references: [id])
+  signedByTypedName  String?
+  signedAt           DateTime?
+  uploadedFileData   String?   @db.Text
+  uploadedFileName   String?
+  uploadedAt         DateTime?
+  // No automatic recurring reminder scheduler exists in this backend (that
+  // would need a cron/job-queue setup, not just a route) — reminders are
+  // triggered manually by Admin/HR clicking "Send Reminder", tracked here.
+  remindersSentCount Int       @default(0)
+  lastReminderAt     DateTime?
+
+  @@unique([documentId, userId])
+}
+
 // Admin-uploaded payslips per employee, per month.
 model Payslip {
   id           String   @id @default(cuid())
@@ -337,6 +976,26 @@ model Payslip {
   uploadedById String?
   uploadedBy   User?    @relation("PayslipUploader", fields: [uploadedById], references: [id])
   createdAt    DateTime @default(now())
+
+  // Set when this payslip was generated automatically from attendance as
+  // part of a monthly payroll finalization, rather than manually uploaded.
+  isAutoCalculated Boolean @default(false)
+  payrollPeriodId  String?
+  payrollPeriod    PayrollPeriod? @relation(fields: [payrollPeriodId], references: [id])
+  daysInMonth   Int?
+  daysPresent   Int?
+  daysAbsent    Int?
+  daysOnLeave   Int?
+  daysHoliday   Int?
+  grossPay      Float?
+  netPay        Float?
+
+  // If an employee flags this payslip as wrong, the dispute is recorded
+  // here and handled in the *next* month's payroll run — a finalized
+  // month's numbers are never silently edited after the fact.
+  disputeNote     String? @db.Text
+  disputeRaisedAt DateTime?
+  disputeResolved Boolean @default(false)
 }
 
 // Admin-managed reference documents (checklists, templates, etc.) shown in
@@ -357,6 +1016,7 @@ model InfoDocument {
   id           String   @id @default(cuid())
   title        String
   category     String   // e.g. "Checklist", "Template", "Guide"
+  active       Boolean  @default(true)
   fileName     String
   mimeType     String
   fileData     String   @db.Text // base64 — see note on Comment.attachmentUrl re: real file storage
