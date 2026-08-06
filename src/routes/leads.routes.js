@@ -24,13 +24,15 @@ async function notifyLeadershipOfNewLead(lead, sourceLabel) {
   const staff = await prisma.user.findMany({
     where: { role: { in: ['ADMIN', 'SUPER_ADMIN', 'MANAGER', 'HR', 'EMPLOYEE', 'COUNSELLOR'] }, active: true },
   });
+  console.log(`[notifyLeadershipOfNewLead] Found ${staff.length} staff to notify for lead "${lead.name}":`, staff.map(p => p.email).join(', ') || '(none)');
   for (const person of staff) {
     try {
-      await sendMail({
+      const result = await sendMail({
         to: person.email,
         subject: `🔴 HIGH PRIORITY — New lead: ${lead.name} (${sourceLabel})`,
         body: `Hi ${person.fullName},\n\nA new lead has come in via ${sourceLabel} — please reach out quickly:\n\nName: ${lead.name}\nCountry: ${lead.country}\nService: ${lead.service}\n\nThis lead is currently unassigned. Whoever picks it up first should assign it to themselves and reach out right away. It will be auto-assigned within 30 minutes if no one does.\n\nBest,\nDream2Fly`,
       });
+      console.log(`[notifyLeadershipOfNewLead] sendMail result for ${person.email}:`, result);
     } catch (err) {
       // One recipient's mailbox/SMTP hiccup should never stop the rest of
       // the team from being notified, and should never be allowed to
