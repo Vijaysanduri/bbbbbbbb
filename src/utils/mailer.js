@@ -1,5 +1,86 @@
 const nodemailer = require('nodemailer');
 
+// Wraps a plain-text email body in a branded HTML template — the exact
+// same header/footer banner images used on the onboarding documents
+// (hosted on the website, not embedded as base64, so emails stay small
+// and render reliably across mail clients), with the message in between.
+// Plain-text \n\n becomes a new paragraph; single \n becomes a line break.
+const SITE_BASE_URL = 'https://dream2fly.co.uk';
+
+// ---- Design A: full illustrated letterhead (world map, skyline, service icons) ----
+function wrapEmailHtmlDesignA(subject, bodyText) {
+  const paragraphs = bodyText.split(/\n\n+/).map(block =>
+    '<p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#333333;">' +
+      block.split('\n').map(line => escapeHtml(line)).join('<br>') +
+    '</p>'
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
+    <tr><td align="center">
+      <table width="100%" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);" cellpadding="0" cellspacing="0">
+        <tr><td>
+          <img src="${SITE_BASE_URL}/images/email/header-banner.png" alt="Dream2Fly Consulting Services Limited" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
+        </td></tr>
+        <tr><td style="padding:10px 28px 4px;">
+          <div style="font-size:17px; font-weight:700; color:#0B1F4D; text-align:center; padding-bottom:14px; border-bottom:3px solid #F6C221;">${escapeHtml(subject)}</div>
+        </td></tr>
+        <tr><td style="background:#ffffff; padding:24px 28px 8px;">
+          ${paragraphs}
+        </td></tr>
+        <tr><td>
+          <img src="${SITE_BASE_URL}/images/email/footer-banner.png" alt="Dream2Fly Consulting Services Limited — Hyderabad, Vijayawada, London" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+// ---- Design B: flat gold banner + logo/name + dark subtitle bar (matches
+// the simpler "colored banner with company name, subtitle bar below" style
+// requested as a second option) — footer stays the same branded banner
+// image as Design A, for visual consistency between the two. ----
+function wrapEmailHtmlDesignB(subject, bodyText) {
+  const paragraphs = bodyText.split(/\n\n+/).map(block =>
+    '<p style="margin:0 0 16px; font-size:15px; line-height:1.6; color:#333333;">' +
+      block.split('\n').map(line => escapeHtml(line)).join('<br>') +
+    '</p>'
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
+    <tr><td align="center">
+      <table width="100%" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);" cellpadding="0" cellspacing="0">
+        <tr><td style="background:#F6C221; padding:34px 24px 28px; text-align:center;">
+          <img src="${SITE_BASE_URL}/images/email/logo-mark.png" width="52" height="45" alt="Dream2Fly" style="display:block; margin:0 auto 10px;">
+          <div style="font-size:26px; font-weight:800; color:#0B1F4D; letter-spacing:0.5px;">DREAM<span style="color:#A11D24;">2</span>FLY</div>
+          <div style="font-size:11px; font-weight:700; color:#0B1F4D; letter-spacing:2px; margin-top:2px;">CONSULTING SERVICES LIMITED</div>
+        </td></tr>
+        <tr><td style="background:#0B1F4D; padding:16px 24px; text-align:center;">
+          <div style="font-size:16px; font-weight:700; color:#ffffff;">${escapeHtml(subject)}</div>
+        </td></tr>
+        <tr><td style="background:#ffffff; padding:28px 28px 8px;">
+          ${paragraphs}
+        </td></tr>
+        <tr><td>
+          <img src="${SITE_BASE_URL}/images/email/footer-banner.png" alt="Dream2Fly Consulting Services Limited — Hyderabad, Vijayawada, London" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // If SMTP settings are provided in .env, real emails are sent.
 // Otherwise, emails are logged to the console — safe default for local dev,
 // and means you can build/test the whole flow before wiring a real inbox.
@@ -27,6 +108,7 @@ async function sendMail({ to, subject, body, attachmentFileName, attachmentBase6
     to,
     subject,
     text: body,
+    html: wrapEmailHtmlDesignB(subject, body),
   };
   if (attachmentFileName && attachmentBase64) {
     mailOptions.attachments = [{
@@ -105,4 +187,4 @@ function renderQuickCandidateTemplate(template, name) {
   return { subject: t.subject, body: t.body.replace(/{{name}}/g, name) };
 }
 
-module.exports = { sendMail, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate };
+module.exports = { sendMail, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB };
