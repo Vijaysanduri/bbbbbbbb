@@ -86,10 +86,24 @@ function escapeHtml(str) {
 // and means you can build/test the whole flow before wiring a real inbox.
 let transporter = null;
 if (process.env.SMTP_HOST) {
+  const port = Number(process.env.SMTP_PORT || 587);
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined
+    port,
+    // Port 465 (used by Hostinger/Titan) requires implicit SSL from the
+    // first byte of the connection. Port 587 uses STARTTLS instead — the
+    // connection starts plain and is upgraded, so secure must be false
+    // there or the handshake fails.
+    secure: port === 465,
+    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+    // Without these, a blocked/unreachable SMTP port (common on cloud
+    // hosts that restrict outbound mail ports) hangs the connection
+    // attempt for minutes with no error — which then hangs whatever
+    // request triggered the email. Fail fast instead so it always shows
+    // up as a clear, timely error in the logs.
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
   });
 }
 
