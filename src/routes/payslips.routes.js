@@ -2,6 +2,7 @@ const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
+const { logActivity } = require('../utils/activityLog');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -10,10 +11,22 @@ const prisma = new PrismaClient();
 router.get('/me', requireAuth, async (req, res) => {
   const slips = await prisma.payslip.findMany({
     where: { userId: req.user.id },
-    select: { id: true, month: true, fileName: true, mimeType: true, createdAt: true },
+    select: { id: true, month: true, fileName: true, mimeType: true, createdAt: true, netPay: true, isAutoCalculated: true, disputeNote: true, disputeResolved: true },
     orderBy: { month: 'desc' },
   });
   res.json(slips);
+});
+
+// GET /api/payslips/disputes — Admin/Super Admin/HR only. Every unresolved
+// dispute, across all employees, so it can be reviewed before next month's run.
+// Registered before GET /:id so "disputes" is never mistaken for a payslip ID.
+router.get('/disputes', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const disputes = await prisma.payslip.findMany({
+    where: { disputeNote: { not: null }, disputeResolved: false },
+    include: { user: { select: { fullName: true, email: true } } },
+    orderBy: { disputeRaisedAt: 'desc' },
+  });
+  res.json(disputes);
 });
 
 // GET /api/payslips/:id — download (only your own, or Admin)
@@ -22,6 +35,7 @@ router.get('/:id', requireAuth, async (req, res) => {
   if (!slip) return res.status(404).json({ error: 'Payslip not found.' });
   const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(req.user.role);
   if (!isAdmin && slip.userId !== req.user.id) return res.status(403).json({ error: 'Not your payslip.' });
+  await logActivity(`${req.user.fullName} viewed the ${slip.month} payslip${isAdmin && slip.userId !== req.user.id ? ' (staff access)' : ''}.`, req.user.id);
   res.json(slip);
 });
 
@@ -61,6 +75,28 @@ router.delete('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (r
   if (!slip) return res.status(404).json({ error: 'Payslip not found.' });
   await prisma.payslip.delete({ where: { id: slip.id } });
   res.json({ success: true });
+});
+
+// POST /api/payslips/:id/dispute — the payslip's own employee only.
+// Records a note; resolved manually by Admin/HR in the following month's
+// payroll run rather than editing this already-finalized payslip.
+router.post('/:id/dispute', requireAuth, async (req, res) => {
+  const { note } = req.body;
+  if (!note) return res.status(400).json({ error: 'note is required.' });
+  const slip = await prisma.payslip.findUnique({ where: { id: req.params.id } });
+  if (!slip) return res.status(404).json({ error: 'Payslip not found.' });
+  if (slip.userId !== req.user.id) return res.status(403).json({ error: 'Not your payslip.' });
+  const updated = await prisma.payslip.update({
+    where: { id: slip.id },
+    data: { disputeNote: note, disputeRaisedAt: new Date(), disputeResolved: false },
+  });
+  res.json(updated);
+});
+
+// PATCH /api/payslips/:id/resolve-dispute — Admin/Super Admin/HR only.
+router.patch('/:id/resolve-dispute', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const updated = await prisma.payslip.update({ where: { id: req.params.id }, data: { disputeResolved: true } });
+  res.json(updated);
 });
 
 module.exports = router;

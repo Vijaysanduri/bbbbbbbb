@@ -2,6 +2,8 @@ const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail, renderTemplate } = require('../utils/mailer');
+const { sendWhatsApp } = require('../utils/whatsapp');
+const { createNotification } = require('../utils/notifications');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -15,6 +17,37 @@ async function logActivity(text, actorId) {
 // Consultation" form calls. Always tagged source=WEBSITE regardless of
 // what the client sends, since anything submitted here genuinely came
 // from the website.
+// Notifies every Admin/Super Admin/Manager the moment a new lead comes in
+// — from the website or a Channel Partner — so leadership sees it
+// immediately, not just whenever someone happens to check the dashboard.
+async function notifyLeadershipOfNewLead(lead, sourceLabel) {
+  const staff = await prisma.user.findMany({
+    where: { role: { in: ['ADMIN', 'SUPER_ADMIN', 'MANAGER', 'HR', 'EMPLOYEE', 'COUNSELLOR'] }, active: true },
+  });
+  for (const person of staff) {
+    await sendMail({
+      to: person.email,
+      subject: `🔴 HIGH PRIORITY — New lead: ${lead.name} (${sourceLabel})`,
+      body: `Hi ${person.fullName},\n\nA new lead has come in via ${sourceLabel} — please reach out quickly:\n\nName: ${lead.name}\nCountry: ${lead.country}\nService: ${lead.service}\n\nThis lead is currently unassigned. Whoever picks it up first should assign it to themselves and reach out right away. It will be auto-assigned within 30 minutes if no one does.\n\nBest,\nDream2Fly`,
+    });
+  }
+}
+
+// Sends an automatic initial greeting on WhatsApp the moment any new lead
+// comes in — so the candidate hears from Dream2Fly right away, while
+// employees are still deciding who's picking it up (the popup+buzzer
+// alert is the employee-facing half of this same moment). Real delivery
+// only happens once WHATSAPP_API_URL/TOKEN are configured — until then
+// this safely logs instead, exactly like every other not-yet-configured
+// integration in this app.
+async function sendInitialWhatsAppGreeting(lead) {
+  const number = lead.whatsappNumber || lead.contactPhone;
+  if (!number) return;
+  const firstName = (lead.name || '').split(' ')[0];
+  const message = `Hi ${firstName || 'there'}! 👋 Thanks for reaching out to Dream2Fly Consulting regarding ${lead.service || 'your enquiry'}${lead.country ? ' for ' + lead.country : ''}. One of our counsellors will call you shortly to understand your requirements and guide you through the next steps. In the meantime, feel free to reply here with any questions!`;
+  await sendWhatsApp({ to: number, message });
+}
+
 router.post('/public', async (req, res) => {
   const { name, email, phone, service, country } = req.body;
   if (!name || !phone || !service) {
@@ -33,6 +66,8 @@ router.post('/public', async (req, res) => {
     },
   });
   await logActivity(name + ' submitted the website registration form.', null);
+  await notifyLeadershipOfNewLead(lead, 'Website');
+  await sendInitialWhatsAppGreeting(lead);
   res.status(201).json({ success: true, message: 'Thanks — a counsellor will contact you shortly.' });
 });
 
@@ -60,6 +95,7 @@ router.get('/', requireAuth, async (req, res) => {
       followUps: { orderBy: { date: 'desc' }, include: { loggedBy: { select: { id: true, fullName: true } } } },
       comments: { orderBy: { createdAt: 'asc' } },
       assignedEmployee: { select: { id: true, fullName: true } },
+      referredByPartner: { select: { id: true, fullName: true } },
     },
     orderBy: { dateAdded: 'desc' }
   });
@@ -67,10 +103,63 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // GET /api/leads/:id
+// GET /api/leads/sla-status — Admin/Super Admin/Manager only. The daily
+// standup view: leads unassigned, leads awaiting first contact, and
+// leads with no update logged today. Registered before GET /:id so
+// "sla-status" is never mistaken for a lead ID.
+router.get('/sla-status', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+  const todayStart = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
+
+  const unassigned = await prisma.lead.findMany({
+    where: { assignedAt: null, status: { not: 'CONVERTED' } },
+    select: { id: true, name: true, country: true, service: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  const awaitingContact = await prisma.lead.findMany({
+    where: { assignedAt: { not: null }, status: { not: 'CONVERTED' } },
+    include: { followUps: true, assignedEmployee: { select: { fullName: true } } },
+  });
+  const stillAwaitingContact = awaitingContact
+    .filter(l => l.followUps.length === 0)
+    .map(l => ({ id: l.id, name: l.name, assignedTo: l.assignedEmployee?.fullName, assignedAt: l.assignedAt }));
+
+  const activeLeads = await prisma.lead.findMany({
+    where: { status: { not: 'CONVERTED' } },
+    include: { followUps: { orderBy: { date: 'desc' }, take: 1 }, comments: { orderBy: { createdAt: 'desc' }, take: 1 }, assignedEmployee: { select: { fullName: true } } },
+  });
+  const noProgressToday = activeLeads
+    .filter(l => {
+      const lastActivity = [l.followUps[0]?.date, l.comments[0]?.createdAt].filter(Boolean).sort().pop();
+      return !lastActivity || new Date(lastActivity) < todayStart;
+    })
+    .map(l => ({ id: l.id, name: l.name, assignedTo: l.assignedEmployee?.fullName }));
+
+  res.json({ unassigned, stillAwaitingContact, noProgressToday });
+});
+
+// GET /api/leads/new-since?since=ISO_TIMESTAMP — any signed-in staff
+// member (not Partner/Student). Powers the in-app popup+buzzer alert —
+// the dashboard polls this every 30s with the last time it checked, and
+// gets back anything created since then. Registered before GET /:id so
+// "new-since" is never mistaken for a lead ID.
+router.get('/new-since', requireAuth, async (req, res) => {
+  if (['CHANNEL_PARTNER', 'STUDENT'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Not available for this role.' });
+  }
+  const since = req.query.since ? new Date(req.query.since) : new Date(Date.now() - 60 * 1000);
+  const newLeads = await prisma.lead.findMany({
+    where: { dateAdded: { gt: since } },
+    select: { id: true, name: true, country: true, service: true, source: true, dateAdded: true },
+    orderBy: { dateAdded: 'asc' },
+  });
+  res.json({ checkedAt: new Date().toISOString(), newLeads });
+});
+
 router.get('/:id', requireAuth, async (req, res) => {
   const lead = await prisma.lead.findUnique({
     where: { id: req.params.id },
-    include: { history: { orderBy: { date: 'asc' } }, followUps: { orderBy: { date: 'desc' } }, comments: { orderBy: { createdAt: 'asc' }, include: { author: true } } }
+    include: { history: { orderBy: { date: 'asc' } }, followUps: { orderBy: { date: 'desc' } }, comments: { orderBy: { createdAt: 'asc' }, include: { author: true } }, referredByPartner: { select: { id: true, fullName: true } } }
   });
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
   if (req.user.role === 'CHANNEL_PARTNER' && lead.assignedEmployeeId !== req.user.id) {
@@ -82,19 +171,42 @@ router.get('/:id', requireAuth, async (req, res) => {
 // POST /api/leads
 // Body: { name, country, service, source }
 router.post('/', requireAuth, async (req, res) => {
-  const { name, country, service, source, contactPhone, contactEmail } = req.body;
-  if (!name || !country || !service) {
+  const { name, country, service, source, contactPhone, contactEmail, whatsappNumber, resumeFileData, resumeFileName } = req.body;
+  const isPartner = req.user.role === 'CHANNEL_PARTNER';
+  // Partners only capture minimal contact info — everything else (country,
+  // service, full requirements) is gathered by the employee once assigned.
+  if (isPartner) {
+    if (!name || !contactPhone) {
+      return res.status(400).json({ error: 'Full name and phone number are required.' });
+    }
+  } else if (!name || !country || !service) {
     return res.status(400).json({ error: 'name, country and service are required.' });
   }
   const lead = await prisma.lead.create({
     data: {
-      name, country, service, source: source || 'OTHER', contactPhone: contactPhone || null, contactEmail: contactEmail || null,
+      name,
+      country: country || 'Not specified',
+      service: service || 'General Enquiry',
+      source: source || (isPartner ? 'REFERRAL' : 'OTHER'),
+      contactPhone: contactPhone || null,
+      contactEmail: contactEmail || null,
+      whatsappNumber: whatsappNumber || null,
+      resumeFileData: resumeFileData || null,
+      resumeFileName: resumeFileName || null,
       assignedEmployeeId: req.user.id,
+      assignedAt: isPartner ? null : new Date(),
+      referredByPartnerId: isPartner ? req.user.id : null,
       history: { create: [{ stage: 'ENQUIRY_RECEIVED' }] }
     },
     include: { history: true, followUps: true, comments: true }
   });
   await logActivity(`${lead.name} added as a new lead.`, req.user.id);
+  if (isPartner) {
+    await notifyLeadershipOfNewLead(lead, 'Channel Partner referral');
+  } else if (lead.source === 'INSTAGRAM' || lead.source === 'FACEBOOK') {
+    await notifyLeadershipOfNewLead(lead, lead.source === 'INSTAGRAM' ? 'Instagram' : 'Facebook');
+  }
+  await sendInitialWhatsAppGreeting(lead);
   res.status(201).json(lead);
 });
 
@@ -159,7 +271,7 @@ router.post('/:id/followups', requireAuth, async (req, res) => {
 // POST /api/leads/:id/comments
 // Body: { text, attachmentUrl?, attachmentName?, channel? }
 router.post('/:id/comments', requireAuth, async (req, res) => {
-  const { text, attachmentUrl, attachmentName, channel } = req.body;
+  const { text, attachmentUrl, attachmentName, channel, sendEmail } = req.body;
   if (!text) return res.status(400).json({ error: 'text is required.' });
   const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
@@ -170,7 +282,7 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
   });
 
   let mailResult = null;
-  if (channel === 'CANDIDATE_FACING') {
+  if (channel === 'CANDIDATE_FACING' && sendEmail !== false) {
     if (!lead.contactEmail) {
       return res.status(400).json({ error: 'Comment saved, but no email on file for this lead — add one first.', comment });
     }
@@ -220,6 +332,7 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
       stage: 'DOC_CHECKLIST_SENT',
       contactPhone: lead.contactPhone,
       contactEmail: lead.contactEmail,
+      referredByPartnerId: lead.referredByPartnerId,
       assignedEmployeeId: req.user.id,
       convertedFromLeadId: lead.id,
       comments: {
@@ -246,10 +359,16 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
 // PATCH /api/leads/:id — Admin/Super Admin only. Direct edit of a lead's
 // core fields (not a status-change email flow — just correcting/updating
 // data). For status changes with the candidate email, use PATCH /:id/status.
-router.patch('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { name, country, service, source, status, contactPhone, contactEmail } = req.body;
+router.patch('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+  const { name, country, service, source, status, contactPhone, contactEmail, assignedEmployeeId } = req.body;
   const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
   if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+  // assignedEmployeeId === undefined means "don't touch it"; null explicitly
+  // means "unassign — open for anyone to claim"; any other value is a
+  // real reassignment. Distinguishing these matters: a falsy check alone
+  // would make it impossible to ever clear an assignment back to "everyone."
+  const isChangingAssignment = assignedEmployeeId !== undefined && assignedEmployeeId !== lead.assignedEmployeeId;
+  const isReassigningToSomeone = isChangingAssignment && !!assignedEmployeeId;
   const updated = await prisma.lead.update({
     where: { id: lead.id },
     data: {
@@ -260,9 +379,21 @@ router.patch('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (re
       ...(status ? { status } : {}),
       ...(contactPhone !== undefined ? { contactPhone } : {}),
       ...(contactEmail !== undefined ? { contactEmail } : {}),
+      ...(isChangingAssignment ? { assignedEmployeeId: assignedEmployeeId || null, assignedAt: isReassigningToSomeone ? new Date() : null, unassignedAlertSent: !isReassigningToSomeone, contactAlertSent: false } : {}),
     },
   });
   await logActivity(`${updated.name} — edited by admin.`, req.user.id);
+  if (isReassigningToSomeone) {
+    const employee = await prisma.user.findUnique({ where: { id: assignedEmployeeId } });
+    if (employee) {
+      await sendMail({
+        to: employee.email,
+        subject: `Lead assigned to you: ${updated.name}`,
+        body: `Hi ${employee.fullName},\n\n"${updated.name}" (${updated.country}, ${updated.service}) has been assigned to you. Please reach out as soon as possible — this is tracked against a 30-minute first-contact target.\n\nBest,\nDream2Fly`,
+      });
+      await createNotification(employee.id, 'New lead assigned', `"${updated.name}" (${updated.country}, ${updated.service}) has been assigned to you.`, 'LEAD_ASSIGNED', 'applicants');
+    }
+  }
   res.json(updated);
 });
 
@@ -281,26 +412,41 @@ router.delete('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (r
 // server-side so the numbers are trustworthy (not derived from whatever
 // the browser happens to have loaded).
 router.get('/stats/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const dateStr = req.query.date || new Date().toISOString().slice(0, 10);
-  const dayStart = new Date(dateStr + 'T00:00:00.000Z');
-  const dayEnd = new Date(dateStr + 'T23:59:59.999Z');
+  const { employeeId, country } = req.query;
+  const fromStr = req.query.from || req.query.date || new Date().toISOString().slice(0, 10);
+  const toStr = req.query.to || req.query.date || new Date().toISOString().slice(0, 10);
+  const rangeStart = new Date(fromStr + 'T00:00:00.000Z');
+  const rangeEnd = new Date(toStr + 'T23:59:59.999Z');
 
   const employees = await prisma.user.findMany({
-    where: { role: { in: ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'] }, active: true },
+    where: { role: { in: ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'] }, active: true, ...(employeeId ? { id: employeeId } : {}) },
     select: { id: true, fullName: true },
   });
 
   const stats = await Promise.all(employees.map(async (emp) => {
-    const [callsToday, callBackPending, confirmed, converted] = await Promise.all([
-      prisma.followUp.count({ where: { loggedById: emp.id, type: 'CALL', date: { gte: dayStart, lte: dayEnd } } }),
-      prisma.lead.count({ where: { assignedEmployeeId: emp.id, currentTag: { in: ['CALL_BACK_TODAY', 'CALL_BACK_TOMORROW', 'CALL_BACK_LATER'] } } }),
-      prisma.lead.count({ where: { assignedEmployeeId: emp.id, currentTag: 'CONFIRMED' } }),
-      prisma.lead.count({ where: { assignedEmployeeId: emp.id, status: 'CONVERTED' } }),
+    const leadWhere = { assignedEmployeeId: emp.id, ...(country ? { country } : {}) };
+    const [callsInRange, callBackPending, confirmed, converted, leadsByStatusRaw] = await Promise.all([
+      prisma.followUp.count({ where: { loggedById: emp.id, type: 'CALL', date: { gte: rangeStart, lte: rangeEnd } } }),
+      prisma.lead.count({ where: { ...leadWhere, currentTag: { in: ['CALL_BACK_TODAY', 'CALL_BACK_TOMORROW', 'CALL_BACK_LATER'] } } }),
+      prisma.lead.count({ where: { ...leadWhere, currentTag: 'CONFIRMED' } }),
+      prisma.lead.count({ where: { ...leadWhere, status: 'CONVERTED' } }),
+      prisma.lead.groupBy({ by: ['status'], where: leadWhere, _count: true }),
     ]);
-    return { employeeId: emp.id, employeeName: emp.fullName, callsToday, callBackPending, confirmed, converted };
+    const leadsByStatus = {};
+    leadsByStatusRaw.forEach(row => { leadsByStatus[row.status] = row._count; });
+    return { employeeId: emp.id, employeeName: emp.fullName, callsInRange, callBackPending, confirmed, converted, leadsByStatus };
   }));
 
-  res.json({ date: dateStr, stats });
+  res.json({ from: fromStr, to: toStr, stats });
+});
+
+// POST /api/leads/auto-assign — Admin/Super Admin/Manager only. Manually
+// triggers the same auto-assignment logic the 5-minute scheduler runs
+// automatically — useful for "assign right now" instead of waiting.
+router.post('/auto-assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+  const { autoAssignStaleLeads } = require('../utils/slaScheduler');
+  const result = await autoAssignStaleLeads();
+  res.json(result);
 });
 
 module.exports = router;

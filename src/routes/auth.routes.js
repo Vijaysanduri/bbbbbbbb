@@ -2,14 +2,19 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, requirePermission, requireHrCapability } = require('../middleware/auth');
+const { logActivity } = require('../utils/activityLog');
+const { rateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
+const loginRateLimit = rateLimiter({ maxAttempts: 10, windowMs: 15 * 60 * 1000, message: 'Too many login attempts. Please wait a few minutes and try again.' });
+const passwordChangeRateLimit = rateLimiter({ maxAttempts: 5, windowMs: 15 * 60 * 1000, message: 'Too many password change attempts. Please wait a few minutes and try again.' });
+
 // POST /api/auth/login
 // Body: { email, password }
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimit, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required.' });
@@ -37,7 +42,20 @@ router.post('/login', async (req, res) => {
 router.get('/me', requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.id } });
   if (!user) return res.status(404).json({ error: 'User not found.' });
-  res.json({ id: user.id, fullName: user.fullName, email: user.email, role: user.role, jobTitle: user.jobTitle, phone: user.phone });
+  res.json({ id: user.id, fullName: user.fullName, email: user.email, role: user.role, jobTitle: user.jobTitle, phone: user.phone, profilePhotoData: user.profilePhotoData, profilePhotoMimeType: user.profilePhotoMimeType });
+});
+
+// PATCH /api/auth/me/photo — upload your own real profile photo. No
+// stock/placeholder substitution — this is only ever whatever the
+// person themselves uploads.
+router.patch('/me/photo', requireAuth, async (req, res) => {
+  const { photoData, mimeType } = req.body;
+  if (!photoData) return res.status(400).json({ error: 'photoData is required.' });
+  const updated = await prisma.user.update({
+    where: { id: req.user.id },
+    data: { profilePhotoData: photoData, profilePhotoMimeType: mimeType || 'image/jpeg' },
+  });
+  res.json({ id: updated.id, profilePhotoData: updated.profilePhotoData, profilePhotoMimeType: updated.profilePhotoMimeType });
 });
 
 // PATCH /api/auth/me — update own phone number
@@ -49,7 +67,7 @@ router.patch('/me', requireAuth, async (req, res) => {
 
 // POST /api/auth/change-password
 // Body: { currentPassword, newPassword }
-router.post('/change-password', requireAuth, async (req, res) => {
+router.post('/change-password', requireAuth, passwordChangeRateLimit, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'currentPassword and newPassword are required.' });
@@ -67,15 +85,200 @@ router.post('/change-password', requireAuth, async (req, res) => {
   res.json({ success: true, message: 'Password updated. Please sign in again on other devices.' });
 });
 
+// PATCH /api/auth/employees/:id/salary — Admin/Super Admin/HR only.
+// Body: { baseSalary }
+router.patch('/employees/:id/salary', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const { baseSalary } = req.body;
+  if (baseSalary == null || isNaN(baseSalary)) return res.status(400).json({ error: 'baseSalary must be a number.' });
+  const updated = await prisma.user.update({ where: { id: req.params.id }, data: { baseSalary: parseFloat(baseSalary) } });
+  res.json({ id: updated.id, baseSalary: updated.baseSalary });
+});
+
+// PATCH /api/auth/employees/:id/permissions — Admin/Super Admin only.
+// Per-person feature grants, independent of role — the "on/off" toggle
+// that lets Admin give any individual access to specific Admin-dashboard
+// features (currently: Resignations management, Employee 360) without
+// changing their role or granting broader access.
+router.patch('/employees/:id/permissions', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { canAccessResignationsAdmin, canAccessEmployee360 } = req.body;
+  const updated = await prisma.user.update({
+    where: { id: req.params.id },
+    data: {
+      ...(canAccessResignationsAdmin !== undefined ? { canAccessResignationsAdmin: !!canAccessResignationsAdmin } : {}),
+      ...(canAccessEmployee360 !== undefined ? { canAccessEmployee360: !!canAccessEmployee360 } : {}),
+    },
+    select: { id: true, fullName: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
+  });
+  const changes = [];
+  if (canAccessResignationsAdmin !== undefined) changes.push('Resignations Admin: ' + (canAccessResignationsAdmin ? 'ON' : 'OFF'));
+  if (canAccessEmployee360 !== undefined) changes.push('Employee 360: ' + (canAccessEmployee360 ? 'ON' : 'OFF'));
+  if (changes.length) await logActivity(`Permissions changed for ${updated.fullName} — ${changes.join(', ')}.`, req.user.id);
+  res.json(updated);
+});
+
+// GET /api/auth/me/dashboard-access — any authenticated user. Checked
+// fresh from the DB (not the JWT) so a revoked grant takes effect
+// immediately. Used by the Admin dashboard's auth-guard: Admin/Super
+// Admin always get in; anyone else needs at least one Admin-feature
+// permission granted to them specifically.
+router.get('/me/dashboard-access', requireAuth, async (req, res) => {
+  if (['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.json({ allowed: true });
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { canAccessResignationsAdmin: true, canAccessEmployee360: true },
+  });
+  const allowed = !!(user && (user.canAccessResignationsAdmin || user.canAccessEmployee360));
+  res.json({ allowed, permissions: user });
+});
+
 // GET /api/auth/employees — Admin/Super Admin only. Used for dropdowns
-// (payslip upload, asset assignment, etc.) — not a general user directory.
-router.get('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+// (payslip upload, asset assignment, etc.) and now also shows each
+// person's current reporting manager, for the admin assignment UI.
+// GET /api/auth/employees — Admin/Super Admin, or anyone granted either
+// Admin-feature permission (both Resignations and Employee 360 need this
+// list for their dropdowns).
+router.get('/employees', requireAuth, async (req, res) => {
+  if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) {
+    let allowed = false;
+    if (req.user.role === 'HR') {
+      const settings = await prisma.roleCapabilitySettings.findUnique({ where: { id: 'singleton' } });
+      allowed = !settings || settings.hrSeesResignations !== false || settings.hrSeesEmployee360 !== false;
+    }
+    if (!allowed) {
+      const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { canAccessResignationsAdmin: true, canAccessEmployee360: true } });
+      allowed = !!(user && (user.canAccessResignationsAdmin || user.canAccessEmployee360));
+    }
+    if (!allowed) {
+      return res.status(403).json({ error: 'You do not have permission to do this.' });
+    }
+  }
   const employees = await prisma.user.findMany({
     where: { active: true },
-    select: { id: true, fullName: true, email: true, role: true },
+    select: { id: true, fullName: true, email: true, role: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
     orderBy: { fullName: 'asc' },
   });
   res.json(employees);
+});
+
+// PATCH /api/auth/employees/:id/reporting-manager — Admin/Super Admin only.
+// Body: { reportingManagerId } (can be null to clear it)
+router.patch('/employees/:id/reporting-manager', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { reportingManagerId } = req.body;
+  if (reportingManagerId === req.params.id) {
+    return res.status(400).json({ error: 'A person cannot be their own reporting manager.' });
+  }
+  const updated = await prisma.user.update({
+    where: { id: req.params.id },
+    data: { reportingManagerId: reportingManagerId || null },
+  });
+  res.json(updated);
+});
+
+// PATCH /api/auth/employees/:id/role — Admin/Super Admin only. Assign or
+// change anyone's role. One guardrail: refuses to demote the very last
+// active Super Admin, since that would lock everyone out of the account
+// that can undo mistakes — everything else is left to Admin's judgment,
+// since this is meant to be full, direct control.
+const VALID_ROLES = ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'HR', 'FINANCE', 'COUNSELLOR', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'EMPLOYEE', 'CHANNEL_PARTNER', 'STUDENT'];
+router.patch('/employees/:id/role', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { role } = req.body;
+  if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Not a valid role.' });
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  if (target.role === 'SUPER_ADMIN' && role !== 'SUPER_ADMIN') {
+    const otherSuperAdmins = await prisma.user.count({ where: { role: 'SUPER_ADMIN', active: true, id: { not: target.id } } });
+    if (otherSuperAdmins === 0) {
+      return res.status(400).json({ error: 'Cannot change this — they are the only active Super Admin. Assign the role to someone else first.' });
+    }
+  }
+  const updated = await prisma.user.update({ where: { id: target.id }, data: { role } });
+  await logActivity(`${req.user.fullName} changed ${target.fullName}'s role from ${target.role} to ${role}.`, req.user.id);
+  res.json({ id: updated.id, role: updated.role });
+});
+
+// GET /api/auth/me/team — any signed-in user. Shows who to go to: their
+// reporting manager, and the active HR contact(s) — this is what powers
+// the "My Team" card on the Employee dashboard.
+router.get('/me/team', requireAuth, async (req, res) => {
+  const me = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    include: { reportingManager: { select: { fullName: true, email: true, phone: true, jobTitle: true } } },
+  });
+  const hrContacts = await prisma.user.findMany({
+    where: { role: 'HR', active: true },
+    select: { fullName: true, email: true, phone: true },
+  });
+  res.json({ reportingManager: me.reportingManager, hrContacts });
+});
+
+// GET /api/auth/employees/:id/full-profile — Admin/Super Admin/HR only.
+// Everything about one employee on a single screen: profile, tenure,
+// resignation status, full payslip history, attendance month-by-month,
+// documents (agreements/onboarding), and assigned assets. Built for the
+// "search one employee, see everything" requirement — especially useful
+// once someone has resigned, to pull their full record in one place.
+router.get('/employees/:id/full-profile', requireAuth, requireHrCapability('hrSeesEmployee360', requirePermission('canAccessEmployee360', 'ADMIN', 'SUPER_ADMIN')), async (req, res) => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.params.id },
+    include: { reportingManager: { select: { fullName: true } } },
+  });
+  if (!user) return res.status(404).json({ error: 'Employee not found.' });
+
+  const resignations = await prisma.resignation.findMany({ where: { userId: user.id }, orderBy: { requestedAt: 'desc' } });
+  const latestResignation = resignations[0] || null;
+
+  const payslips = await prisma.payslip.findMany({
+    where: { userId: user.id },
+    select: { id: true, month: true, netPay: true, daysPresent: true, daysAbsent: true, daysOnLeave: true, isAutoCalculated: true, createdAt: true },
+    orderBy: { month: 'asc' },
+  });
+  const totalSalaryPaid = payslips.reduce((sum, p) => sum + (p.netPay || 0), 0);
+
+  const attendanceRows = await prisma.attendance.findMany({ where: { userId: user.id }, orderBy: { date: 'asc' } });
+  const attendanceByMonth = {};
+  for (const a of attendanceRows) {
+    const monthKey = a.date.toISOString().slice(0, 7);
+    if (!attendanceByMonth[monthKey]) attendanceByMonth[monthKey] = { present: 0, absent: 0, halfDay: 0, onLeave: 0, workFromHome: 0 };
+    const bucket = attendanceByMonth[monthKey];
+    if (a.status === 'PRESENT') bucket.present++;
+    else if (a.status === 'ABSENT') bucket.absent++;
+    else if (a.status === 'HALF_DAY') bucket.halfDay++;
+    else if (a.status === 'ON_LEAVE') bucket.onLeave++;
+    else if (a.status === 'WORK_FROM_HOME') bucket.workFromHome++;
+  }
+
+  const documentAcks = await prisma.signableDocumentAck.findMany({
+    where: { userId: user.id },
+    include: { document: { select: { title: true, category: true } } },
+  });
+
+  const assetAssignments = await prisma.assetAssignment.findMany({
+    where: { userId: user.id },
+    include: { asset: { select: { name: true, category: true } } },
+    orderBy: { assignedAt: 'desc' },
+  });
+
+  const tenureStart = user.createdAt;
+  const tenureEnd = latestResignation && latestResignation.status === 'APPROVED' && latestResignation.actualLastWorkingDay
+    ? latestResignation.actualLastWorkingDay
+    : new Date();
+  const tenureMonths = Math.max(0, Math.round((tenureEnd - tenureStart) / (1000 * 60 * 60 * 24 * 30.44)));
+
+  res.json({
+    profile: {
+      id: user.id, fullName: user.fullName, email: user.email, phone: user.phone, jobTitle: user.jobTitle,
+      role: user.role, active: user.active, baseSalary: user.baseSalary,
+      reportingManager: user.reportingManager ? user.reportingManager.fullName : null,
+      joinedAt: user.createdAt,
+    },
+    tenure: { months: tenureMonths, startedAt: tenureStart, endedAt: latestResignation && latestResignation.status === 'APPROVED' ? tenureEnd : null },
+    resignations,
+    payslips,
+    totalSalaryPaid,
+    attendanceByMonth,
+    documents: documentAcks,
+    assets: assetAssignments,
+  });
 });
 
 module.exports = router;

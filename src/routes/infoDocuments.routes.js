@@ -3,14 +3,19 @@ const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
+const { logActivity } = require('../utils/activityLog');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// GET /api/info-documents — anyone signed in can view/download.
+// GET /api/info-documents — anyone signed in can view/download. Admin/
+// Super Admin see every document (including disabled ones, so they can
+// re-enable them); everyone else only sees active ones.
 router.get('/', requireAuth, async (req, res) => {
+  const isStaff = ['ADMIN', 'SUPER_ADMIN'].includes(req.user.role);
   const docs = await prisma.infoDocument.findMany({
-    select: { id: true, title: true, category: true, fileName: true, mimeType: true, createdAt: true, uploadedBy: { select: { fullName: true } } },
+    where: isStaff ? {} : { active: true },
+    select: { id: true, title: true, category: true, fileName: true, mimeType: true, createdAt: true, active: true, uploadedBy: { select: { fullName: true } } },
     orderBy: { createdAt: 'desc' },
   });
   res.json(docs);
@@ -20,6 +25,7 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   const doc = await prisma.infoDocument.findUnique({ where: { id: req.params.id } });
   if (!doc) return res.status(404).json({ error: 'Document not found.' });
+  await logActivity(`${req.user.fullName} downloaded "${doc.title}" from Information Material.`, req.user.id);
   res.json(doc);
 });
 
@@ -34,6 +40,20 @@ router.post('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, r
     data: { title, category: category || 'Document', fileName, mimeType: mimeType || 'application/octet-stream', fileData, uploadedById: req.user.id },
   });
   res.status(201).json({ id: doc.id, title: doc.title, category: doc.category, fileName: doc.fileName });
+});
+
+// PATCH /api/info-documents/:id — Admin/Super Admin only. Edit the
+// displayed title/category of an already-uploaded document, without
+// needing to delete and re-upload it.
+router.patch('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { title, category, active } = req.body;
+  const doc = await prisma.infoDocument.findUnique({ where: { id: req.params.id } });
+  if (!doc) return res.status(404).json({ error: 'Document not found.' });
+  const updated = await prisma.infoDocument.update({
+    where: { id: doc.id },
+    data: { ...(title ? { title } : {}), ...(category ? { category } : {}), ...(active !== undefined ? { active: !!active } : {}) },
+  });
+  res.json({ id: updated.id, title: updated.title, category: updated.category, active: updated.active });
 });
 
 // DELETE /api/info-documents/:id — Admin/Super Admin only. Nobody else can
@@ -81,6 +101,7 @@ router.post('/:id/send', requireAuth, async (req, res) => {
     });
   }
 
+  await logActivity(`${req.user.fullName} sent "${doc.title}" to ${recipientEmail || recipientPhone || 'a candidate'} via ${via}.`, req.user.id);
   res.json({ mailResult, whatsAppResult });
 });
 
