@@ -1,5 +1,3 @@
-const nodemailer = require('nodemailer');
-
 // Wraps a plain-text email body in a branded HTML template — the exact
 // same header/footer banner images used on the onboarding documents
 // (hosted on the website, not embedded as base64, so emails stay small
@@ -81,35 +79,22 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// If SMTP settings are provided in .env, real emails are sent.
-// Otherwise, emails are logged to the console — safe default for local dev,
-// and means you can build/test the whole flow before wiring a real inbox.
-let transporter = null;
-if (process.env.SMTP_HOST) {
-  const port = Number(process.env.SMTP_PORT || 587);
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port,
-    // Port 465 (used by Hostinger/Titan) requires implicit SSL from the
-    // first byte of the connection. Port 587 uses STARTTLS instead — the
-    // connection starts plain and is upgraded, so secure must be false
-    // there or the handshake fails.
-    secure: port === 465,
-    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
-    // Without these, a blocked/unreachable SMTP port (common on cloud
-    // hosts that restrict outbound mail ports) hangs the connection
-    // attempt for minutes with no error — which then hangs whatever
-    // request triggered the email. Fail fast instead so it always shows
-    // up as a clear, timely error in the logs.
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 10000,
-  });
+// Sends via Resend's HTTP API (https://resend.com) rather than raw SMTP.
+// Cloud hosts like Railway commonly block outbound SMTP ports (25/465/587)
+// to prevent spam abuse — that showed up here as ETIMEDOUT on every SMTP
+// connection attempt, from both live requests and the background SLA
+// reminder scheduler. Resend uses plain HTTPS (port 443), which is never
+// blocked, so this sidesteps the problem entirely instead of tuning
+// timeouts around it. Needs RESEND_API_KEY set as an environment variable
+// (from resend.com/api-keys) to actually send. Without it, this logs
+// instead — same safe-fallback pattern as before.
+function isConfigured() {
+  return !!process.env.RESEND_API_KEY;
 }
 
 async function sendMail({ to, subject, body, attachmentFileName, attachmentBase64, attachmentMimeType }) {
-  if (!transporter) {
-    console.log('--- EMAIL (SMTP not configured, logging instead) ---');
+  if (!isConfigured()) {
+    console.log('--- EMAIL (RESEND_API_KEY not set, logging instead) ---');
     console.log('To:', to);
     console.log('Subject:', subject);
     console.log(body);
@@ -117,22 +102,31 @@ async function sendMail({ to, subject, body, attachmentFileName, attachmentBase6
     console.log('-----------------------------------------------------');
     return { delivered: false, logged: true };
   }
-  const mailOptions = {
+  const payload = {
     from: process.env.EMAIL_FROM || 'Dream2Fly <no-reply@dream2fly.co.uk>',
-    to,
+    to: [to],
     subject,
     text: body,
     html: wrapEmailHtmlDesignB(subject, body),
   };
   if (attachmentFileName && attachmentBase64) {
-    mailOptions.attachments = [{
+    payload.attachments = [{
       filename: attachmentFileName,
       content: attachmentBase64.includes(',') ? attachmentBase64.split(',')[1] : attachmentBase64,
-      encoding: 'base64',
-      contentType: attachmentMimeType || 'application/octet-stream',
     }];
   }
-  await transporter.sendMail(mailOptions);
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Resend API error (${res.status}): ${errBody}`);
+  }
   return { delivered: true };
 }
 
@@ -201,4 +195,4 @@ function renderQuickCandidateTemplate(template, name) {
   return { subject: t.subject, body: t.body.replace(/{{name}}/g, name) };
 }
 
-module.exports = { sendMail, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB };
+module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB };
