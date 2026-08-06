@@ -25,11 +25,18 @@ async function notifyLeadershipOfNewLead(lead, sourceLabel) {
     where: { role: { in: ['ADMIN', 'SUPER_ADMIN', 'MANAGER', 'HR', 'EMPLOYEE', 'COUNSELLOR'] }, active: true },
   });
   for (const person of staff) {
-    await sendMail({
-      to: person.email,
-      subject: `🔴 HIGH PRIORITY — New lead: ${lead.name} (${sourceLabel})`,
-      body: `Hi ${person.fullName},\n\nA new lead has come in via ${sourceLabel} — please reach out quickly:\n\nName: ${lead.name}\nCountry: ${lead.country}\nService: ${lead.service}\n\nThis lead is currently unassigned. Whoever picks it up first should assign it to themselves and reach out right away. It will be auto-assigned within 30 minutes if no one does.\n\nBest,\nDream2Fly`,
-    });
+    try {
+      await sendMail({
+        to: person.email,
+        subject: `🔴 HIGH PRIORITY — New lead: ${lead.name} (${sourceLabel})`,
+        body: `Hi ${person.fullName},\n\nA new lead has come in via ${sourceLabel} — please reach out quickly:\n\nName: ${lead.name}\nCountry: ${lead.country}\nService: ${lead.service}\n\nThis lead is currently unassigned. Whoever picks it up first should assign it to themselves and reach out right away. It will be auto-assigned within 30 minutes if no one does.\n\nBest,\nDream2Fly`,
+      });
+    } catch (err) {
+      // One recipient's mailbox/SMTP hiccup should never stop the rest of
+      // the team from being notified, and should never be allowed to
+      // propagate up into the request that's creating the lead itself.
+      console.error(`[notifyLeadershipOfNewLead] Failed to email ${person.email}:`, err.message);
+    }
   }
 }
 
@@ -66,9 +73,14 @@ router.post('/public', async (req, res) => {
     },
   });
   await logActivity(name + ' submitted the website registration form.', null);
-  await notifyLeadershipOfNewLead(lead, 'Website');
-  await sendInitialWhatsAppGreeting(lead);
+  // Respond to the person right away — they should never sit on
+  // "Submitting…" because an internal notification email or WhatsApp
+  // message is slow or unreachable. Those run in the background; any
+  // failure is caught and logged inside each function, never surfaced
+  // to the visitor filling out the form.
   res.status(201).json({ success: true, message: 'Thanks — a counsellor will contact you shortly.' });
+  notifyLeadershipOfNewLead(lead, 'Website').catch(err => console.error('[leads/public] notifyLeadershipOfNewLead failed:', err.message));
+  sendInitialWhatsAppGreeting(lead).catch(err => console.error('[leads/public] sendInitialWhatsAppGreeting failed:', err.message));
 });
 
 // GET /api/leads?name=&source=&country=&from=&to=
