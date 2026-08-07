@@ -10,6 +10,7 @@ const featureFlagsRoutes = require('./routes/featureFlags.routes');
 const attendanceRoutes = require('./routes/attendance.routes');
 const leavesRoutes = require('./routes/leaves.routes');
 const infoDocumentsRoutes = require('./routes/infoDocuments.routes');
+const emailTemplatesRoutes = require('./routes/emailTemplates.routes');
 const payslipsRoutes = require('./routes/payslips.routes');
 const siteContentRoutes = require('./routes/siteContent.routes');
 const payrollRoutes = require('./routes/payroll.routes');
@@ -65,6 +66,7 @@ app.use('/api/feature-flags', featureFlagsRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/leaves', leavesRoutes);
 app.use('/api/info-documents', infoDocumentsRoutes);
+app.use('/api/email-templates', emailTemplatesRoutes);
 app.use('/api/payslips', payslipsRoutes);
 app.use('/api/site-content', siteContentRoutes);
 app.use('/api/payroll', payrollRoutes);
@@ -112,4 +114,45 @@ app.listen(PORT, () => {
   const { runScheduledReminders } = require('./utils/scheduler');
   setInterval(runScheduledReminders, 24 * 60 * 60 * 1000);
   setTimeout(runScheduledReminders, 60 * 1000); // give the server a minute to settle before the first check
+
+  // One-time starter set for the candidate-email "Quick template" library
+  // — only runs if the table is empty, so this never overwrites templates
+  // once someone starts editing/adding their own. Content here is
+  // deliberately generic starter text with [bracketed] placeholders
+  // where the real specifics (which documents, which lender, which visa
+  // category) need Dream2Fly's actual process filled in — these are
+  // meant to be reviewed and customized via Manage Templates, not sent
+  // to a candidate as-is.
+  seedStarterEmailTemplates();
 });
+
+async function seedStarterEmailTemplates() {
+  const { PrismaClient } = require('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    const count = await prisma.emailTemplate.count();
+    if (count > 0) return;
+    const starters = [
+      { name: 'Introduction — About Dream2Fly', subject: 'Welcome to Dream2Fly — here\'s how we\'ll work together',
+        body: 'Hi {{name}},\n\nThank you for reaching out to Dream2Fly Consulting. We help students with the full journey — university/course selection, application, visa filing, and settling in once you arrive.\n\nYour dedicated counsellor will guide you step by step, and you can always reach us here or by phone.\n\nLooking forward to helping you get there.\n\nBest,\nDream2Fly Team' },
+      { name: 'Checklist — Document Collection', subject: 'Documents we\'ll need from you',
+        body: 'Hi {{name}},\n\nTo get your application moving, please share the following as soon as you can:\n\n- [Passport copy]\n- [Academic transcripts and certificates]\n- [English test score, if available]\n- [Updated CV]\n- [Any other document specific to your course/destination]\n\nYou can upload these directly in your student portal, or reply here.\n\nBest,\nDream2Fly Team' },
+      { name: 'Pending Documents Reminder', subject: 'Still waiting on a few documents from you',
+        body: 'Hi {{name}},\n\nJust a quick reminder — we\'re still waiting on the following before we can move ahead:\n\n- [Document 1]\n- [Document 2]\n\nPlease share these at your earliest convenience so we don\'t lose time on your application.\n\nBest,\nDream2Fly Team' },
+      { name: 'Loan Checklist', subject: 'Documents needed for your education loan',
+        body: 'Hi {{name}},\n\nHere\'s what most lenders will ask for to process your education loan:\n\n- [Admission/Offer letter]\n- [Co-applicant\'s income proof]\n- [Identity and address proof]\n- [Academic records]\n- [Bank statements — last 6 months]\n\nLet us know if you\'d like us to connect you with our partner lenders.\n\nBest,\nDream2Fly Team' },
+      { name: 'Visa Filing Form', subject: 'Next step — visa filing',
+        body: 'Hi {{name}},\n\nCongratulations on reaching the visa stage! To file your application, we\'ll need:\n\n- [CAS/I-20 or equivalent confirmation]\n- [Proof of funds]\n- [Passport]\n- [Completed visa application form — attached/linked here]\n\nPlease review and get these back to us so we can file without delay.\n\nBest,\nDream2Fly Team' },
+      { name: 'Visa Biometric Checklist', subject: 'What to bring to your biometric appointment',
+        body: 'Hi {{name}},\n\nYour biometric appointment is coming up. Please bring:\n\n- [Passport]\n- [Appointment confirmation]\n- [Visa application reference number]\n- [Any supporting documents requested for your specific visa category]\n\nArrive at least [X] minutes early. Let us know if you need to reschedule.\n\nBest,\nDream2Fly Team' },
+      { name: 'Travelling Checklist', subject: 'Getting ready to fly — your pre-departure checklist',
+        body: 'Hi {{name}},\n\nExciting times! Before you travel, make sure you have:\n\n- [Passport and visa]\n- [CAS/I-20 and offer letter — physical copies]\n- [Proof of accommodation]\n- [Sufficient funds/proof of funds documents]\n- [Local currency for initial expenses]\n- [Emergency contact list, including Dream2Fly\'s]\n\nSafe travels — we\'re here if anything comes up.\n\nBest,\nDream2Fly Team' },
+    ];
+    for (const t of starters) {
+      await prisma.emailTemplate.create({ data: t });
+    }
+    console.log(`Seeded ${starters.length} starter email templates.`);
+  } catch (err) {
+    console.error('Could not seed starter email templates:', err.message);
+  }
+}
