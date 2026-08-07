@@ -1,5 +1,6 @@
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcryptjs');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail, renderTemplate, renderTaskStageTemplate, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignB } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
@@ -394,19 +395,50 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
 });
 
 // PATCH /api/tasks/:id/link-student — Admin/Super Admin/Employee/Counsellor/Manager only.
-// Body: { studentEmail } — finds an existing STUDENT-role account with
-// that email and links this task to it, so the candidate can see their
-// own case (task handler contact, comments, document checklist) once
-// they log into their portal. Does not create an account — that already
-// happens through normal student signup/onboarding.
+// Body: { studentEmail, password? } — links this task to a student portal
+// account, creating that account on the spot if none exists yet with
+// this email. This is the only way a student account gets created —
+// there's no public self-signup, matching how every other account in
+// the system is admin-provisioned. If password is omitted, one is
+// generated automatically. Either way, the student is emailed their
+// login. If an account with that email already exists under a
+// different role (staff/partner), this refuses rather than silently
+// repurposing someone else's login.
 router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
-  const { studentEmail } = req.body;
-  if (!studentEmail) return res.status(400).json({ error: 'studentEmail is required.' });
-  const student = await prisma.user.findFirst({ where: { email: studentEmail, role: 'STUDENT' } });
-  if (!student) return res.status(404).json({ error: 'No student account found with that email. They need to sign up first.' });
-  const task = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: student.id } });
-  await logActivity(`${task.related} linked to student portal account (${studentEmail}).`, req.user.id);
-  res.json(task);
+  const { studentEmail, password } = req.body;
+  if (!studentEmail || !studentEmail.includes('@')) return res.status(400).json({ error: 'A valid studentEmail is required.' });
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+
+  let student = await prisma.user.findUnique({ where: { email: studentEmail } });
+  let createdNewAccount = false;
+  let plainPassword = null;
+
+  if (student && student.role !== 'STUDENT') {
+    return res.status(400).json({ error: 'That email already belongs to a non-student account — use a different email for this candidate\'s portal login.' });
+  }
+
+  if (!student) {
+    plainPassword = password && password.length >= 8 ? password : Math.random().toString(36).slice(-10) + 'A1!';
+    const passwordHash = await bcrypt.hash(plainPassword, 10);
+    student = await prisma.user.create({
+      data: { fullName: task.related, email: studentEmail, passwordHash, role: 'STUDENT', phone: task.contactPhone || null },
+    });
+    createdNewAccount = true;
+  }
+
+  const updated = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: student.id } });
+  await logActivity(`${task.related} linked to student portal account (${studentEmail})${createdNewAccount ? ' — new account created' : ''}.`, req.user.id);
+
+  if (createdNewAccount) {
+    sendMail({
+      to: studentEmail,
+      subject: `Your Dream2Fly student portal is ready`,
+      body: `Hi ${task.related},\n\nYour Dream2Fly student portal has been set up — you can now track your application, message your counsellor, and manage documents online.\n\nPortal: https://dream2fly.co.uk/D2fnew/login.html\nEmail: ${studentEmail}\nPassword: ${plainPassword}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
+    }).catch(err => console.error('[link-student] Welcome email failed:', err.message));
+  }
+
+  res.json({ task: updated, createdNewAccount });
 });
 
 module.exports = router;

@@ -67,6 +67,54 @@ router.post('/public', async (req, res) => {
   if (!name || !phone || !service) {
     return res.status(400).json({ error: 'name, phone and service are required.' });
   }
+
+  // If this email OR phone already has a lead, someone re-submitting the
+  // form (didn't hear back, used a different device, wanted to be sure
+  // it went through, etc.) would otherwise create a second duplicate
+  // record — its own buzzer alert, its own row in Applicants, their call
+  // and enquiry history split across two files instead of one. Match on
+  // either contact detail so everything about this person lands in a
+  // single file, however they get in touch.
+  const existingLead = (email || phone)
+    ? await prisma.lead.findFirst({
+        where: {
+          OR: [
+            ...(email ? [{ contactEmail: { equals: email, mode: 'insensitive' } }] : []),
+            ...(phone ? [{ contactPhone: phone }] : []),
+          ],
+        },
+        orderBy: { dateAdded: 'desc' },
+      })
+    : null;
+
+  if (existingLead) {
+    const matchedOn = email && existingLead.contactEmail && existingLead.contactEmail.toLowerCase() === email.toLowerCase() ? 'email' : 'phone number';
+    await prisma.lead.update({
+      where: { id: existingLead.id },
+      data: {
+        comments: { create: [{ isSystem: true, text: `Submitted the website form again (matched by ${matchedOn}) — renewed interest. (Service: ${service}${country ? ', Country: ' + country : ''})` }] },
+      },
+    });
+    await logActivity(`${name} submitted the website form again — matched to their existing enquiry.`, null);
+    res.status(200).json({ success: true, message: 'Thanks — we already have your enquiry and a counsellor will follow up shortly.' });
+    // Not treated as a brand-new lead (no buzzer, no "HIGH PRIORITY" blast)
+    // since it isn't one — but whoever's already handling it (or
+    // leadership, if it's still unassigned) should know the candidate is
+    // trying again, since that often means the first outreach didn't land.
+    notifyRecordWatchers({
+      assignedEmployeeId: existingLead.assignedEmployeeId,
+      title: `Renewed interest from ${name}`,
+      body: `${name} submitted the website form again — they may not have heard back yet.`,
+      type: 'LEAD_COMMENT',
+      link: 'applicants',
+    }).catch(err => console.error('[leads/public] notifyRecordWatchers (repeat submission) failed:', err.message));
+    if (!existingLead.assignedEmployeeId) {
+      notifyLeadershipOfNewLead(existingLead, 'Website — repeat submission, still unassigned')
+        .catch(err => console.error('[leads/public] notifyLeadershipOfNewLead (repeat submission) failed:', err.message));
+    }
+    return;
+  }
+
   const lead = await prisma.lead.create({
     data: {
       name,

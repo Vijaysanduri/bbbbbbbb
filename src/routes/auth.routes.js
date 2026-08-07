@@ -97,6 +97,38 @@ router.post('/change-password', requireAuth, passwordChangeRateLimit, async (req
   res.json({ success: true, message: 'Password updated. Please sign in again on other devices.' });
 });
 
+const forgotPasswordRateLimit = rateLimiter({ maxAttempts: 5, windowMs: 15 * 60 * 1000, message: 'Too many attempts. Please wait a few minutes and try again.' });
+
+// POST /api/auth/forgot-password
+// Body: { email } — no auth required, this IS the "I can't log in" path.
+// Generates a brand new password and emails it to that address, same
+// pattern already used everywhere else in this app (new employee, new
+// student) rather than a token-based reset link, which would need its
+// own page and expiry handling. Always responds with the same generic
+// message regardless of whether the email matched anything — this is
+// deliberate: confirming "yes, that email has an account" to an
+// unauthenticated caller lets someone enumerate every registered email
+// in the system one guess at a time, which is exactly the kind of
+// information a login-adjacent endpoint should never leak.
+router.post('/forgot-password', forgotPasswordRateLimit, async (req, res) => {
+  const { email } = req.body;
+  const genericMessage = 'If that email has an account, a new password has been sent to it.';
+  if (!email) return res.status(400).json({ error: 'Email is required.' });
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (user && user.active) {
+    const newPassword = Math.random().toString(36).slice(-10) + 'A1!';
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+    const { sendMail } = require('../utils/mailer');
+    sendMail({
+      to: user.email,
+      subject: `Your Dream2Fly password has been reset`,
+      body: `Hi ${user.fullName},\n\nYou (or someone using your email) requested a password reset. Here's your new password:\n\n${newPassword}\n\nPlease sign in and change it to something memorable as soon as you can.\n\nIf you didn't request this, contact your admin right away.\n\nBest,\nDream2Fly`,
+    }).catch(err => console.error('[forgot-password] Email failed:', err.message));
+  }
+  res.json({ success: true, message: genericMessage });
+});
+
 // PATCH /api/auth/employees/:id/salary — Admin/Super Admin/HR only.
 // Body: { baseSalary }
 router.patch('/employees/:id/salary', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
