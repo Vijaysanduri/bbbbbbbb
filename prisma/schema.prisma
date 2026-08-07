@@ -394,6 +394,13 @@ model Task {
   fees    String?
   overview String? @db.Text
 
+  // Application reference number and intake term, e.g. "98887/25-26" and
+  // "Sep, 2026" — shown on the case-update notification email so whoever
+  // receives it (candidate, sponsor, or partner) can identify the
+  // application at a glance without opening the portal.
+  applicationId String?
+  intake        String?
+
   // Separate from Overview — a dedicated place to log interview-specific
   // details (questions asked, interviewer feedback, outcome) once a case
   // reaches the interview stage, without mixing it into the general status summary.
