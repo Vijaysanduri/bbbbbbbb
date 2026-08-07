@@ -60,9 +60,21 @@ router.patch('/me/photo', requireAuth, async (req, res) => {
 
 // PATCH /api/auth/me — update own phone number
 router.patch('/me', requireAuth, async (req, res) => {
-  const { phone } = req.body;
-  const user = await prisma.user.update({ where: { id: req.user.id }, data: { phone } });
-  res.json({ id: user.id, phone: user.phone });
+  const { phone, email } = req.body;
+  if (email !== undefined) {
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing && existing.id !== req.user.id) {
+      return res.status(400).json({ error: 'Someone else already has that email.' });
+    }
+  }
+  const user = await prisma.user.update({
+    where: { id: req.user.id },
+    data: { ...(phone !== undefined ? { phone } : {}), ...(email !== undefined ? { email } : {}) },
+  });
+  res.json({ id: user.id, phone: user.phone, email: user.email });
 });
 
 // POST /api/auth/change-password
@@ -158,6 +170,83 @@ router.get('/employees', requireAuth, async (req, res) => {
     orderBy: { fullName: 'asc' },
   });
   res.json(employees);
+});
+
+// POST /api/auth/employees — Admin/Super Admin only. Creates a real staff
+// account (as opposed to scripts/create-user.js, which needed shell
+// access). Requires name, email, and a starting password; phone and role
+// are optional (role defaults to EMPLOYEE). Emails the new person their
+// login so nothing has to be relayed manually.
+router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { fullName, email, phone, password, role, jobTitle, reportingManagerId } = req.body;
+  if (!fullName || !email || !password) {
+    return res.status(400).json({ error: 'Name, email, and a starting password are required.' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    return res.status(400).json({ error: 'Someone with that email already has an account.' });
+  }
+  const chosenRole = role && VALID_ROLES.includes(role) ? role : 'EMPLOYEE';
+  const passwordHash = await bcrypt.hash(password, 10);
+  const created = await prisma.user.create({
+    data: { fullName, email, phone: phone || null, passwordHash, role: chosenRole, jobTitle: jobTitle || null, reportingManagerId: reportingManagerId || null },
+  });
+  await logActivity(`${req.user.fullName} added ${fullName} as a new ${chosenRole.replace('_', ' ').toLowerCase()}.`, req.user.id);
+  const { sendMail } = require('../utils/mailer');
+  sendMail({
+    to: email,
+    subject: `Your Dream2Fly account is ready`,
+    body: `Hi ${fullName},\n\nYou've been added to Dream2Fly's system. Here's how to sign in:\n\nPortal: https://dream2fly.co.uk/D2fnew/login.html\nEmail: ${email}\nPassword: ${password}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
+  }).catch(err => console.error('[employees/create] Welcome email failed:', err.message));
+  res.status(201).json({ id: created.id, fullName: created.fullName, email: created.email, role: created.role });
+});
+
+// PATCH /api/auth/employees/:id — Admin/Super Admin only. Edits the basic
+// profile fields for someone else's account (name/email/phone/jobTitle).
+// Role, salary, reporting manager, and permissions each have their own
+// dedicated endpoints above/below — kept separate so each change is
+// individually logged and permission-checked rather than one big
+// catch-all update.
+router.patch('/employees/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { fullName, email, phone, jobTitle } = req.body;
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  if (email && email !== target.email) {
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return res.status(400).json({ error: 'Someone else already has that email.' });
+  }
+  const updated = await prisma.user.update({
+    where: { id: req.params.id },
+    data: {
+      ...(fullName !== undefined ? { fullName } : {}),
+      ...(email !== undefined ? { email } : {}),
+      ...(phone !== undefined ? { phone } : {}),
+      ...(jobTitle !== undefined ? { jobTitle } : {}),
+    },
+  });
+  await logActivity(`${req.user.fullName} updated ${target.fullName}'s profile details.`, req.user.id);
+  res.json({ id: updated.id, fullName: updated.fullName, email: updated.email, phone: updated.phone, jobTitle: updated.jobTitle });
+});
+
+// PATCH /api/auth/employees/:id/deactivate — Admin/Super Admin only. Soft
+// delete: keeps their historical records (leads, comments, payslips) intact
+// but blocks login and removes them from notification/assignment lists.
+// Same last-Super-Admin guardrail as the role-change endpoint.
+router.patch('/employees/:id/deactivate', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  if (target.role === 'SUPER_ADMIN') {
+    const otherSuperAdmins = await prisma.user.count({ where: { role: 'SUPER_ADMIN', active: true, id: { not: target.id } } });
+    if (otherSuperAdmins === 0) {
+      return res.status(400).json({ error: 'Cannot deactivate the only active Super Admin.' });
+    }
+  }
+  await prisma.user.update({ where: { id: req.params.id }, data: { active: false } });
+  await logActivity(`${req.user.fullName} deactivated ${target.fullName}'s account.`, req.user.id);
+  res.json({ success: true });
 });
 
 // PATCH /api/auth/employees/:id/reporting-manager — Admin/Super Admin only.

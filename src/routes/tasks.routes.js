@@ -1,9 +1,9 @@
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { sendMail, renderTemplate, renderTaskStageTemplate, renderQuickCandidateTemplate } = require('../utils/mailer');
+const { sendMail, renderTemplate, renderTaskStageTemplate, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignB } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
-const { createNotification } = require('../utils/notifications');
+const { createNotification, notifyRecordWatchers } = require('../utils/notifications');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -34,6 +34,49 @@ async function notifyInternalTeam(task, changeDescription, actorName) {
   }
 }
 
+// Emails the fixed "case update" notification (Student's Name / Application
+// Id / Institution / Program / Intake / Status / Title block) to the same
+// audience as the in-app bell — assigned employee, their reporting
+// manager, and every active Admin/Super Admin — minus whoever just made
+// the change. This is deliberately a separate, smaller recipient fetch
+// from notifyInternalTeam above rather than reusing it, since it needs
+// the reporting manager too and each recipient's own name for the
+// greeting line.
+async function notifyCaseWatchersByEmail(task, title, actorId) {
+  const recipientIds = new Set();
+  if (task.assignedEmployeeId) {
+    recipientIds.add(task.assignedEmployeeId);
+    const assignee = await prisma.user.findUnique({ where: { id: task.assignedEmployeeId }, select: { reportingManagerId: true } });
+    if (assignee && assignee.reportingManagerId) recipientIds.add(assignee.reportingManagerId);
+  }
+  const leadership = await prisma.user.findMany({ where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, active: true }, select: { id: true } });
+  leadership.forEach(u => recipientIds.add(u.id));
+  if (actorId) recipientIds.delete(actorId);
+  const recipients = await prisma.user.findMany({ where: { id: { in: [...recipientIds] } }, select: { id: true, fullName: true, email: true } });
+  const portalLink = `https://dream2fly.co.uk/D2fnew/login.html`;
+  for (const person of recipients) {
+    const { subject, body } = renderCaseUpdateTemplate({ recipientName: person.fullName, task, title, portalLink });
+    try {
+      await sendMail({ to: person.email, subject, body });
+    } catch (err) {
+      console.error(`[notifyCaseWatchersByEmail] Failed to email ${person.email}:`, err.message);
+    }
+  }
+}
+
+// POST /api/tasks/email-preview — any signed-in staff member. Renders
+// the exact same branded HTML template a real candidate email would use
+// (header/footer images, layout) without sending anything — powers the
+// "Preview" button in the comment composer so staff can see what the
+// candidate will actually receive before clicking Add. Registered here,
+// before any /:id route, so "email-preview" is never mistaken for a task ID.
+router.post('/email-preview', requireAuth, (req, res) => {
+  const { subject, body } = req.body;
+  if (!body) return res.status(400).json({ error: 'body is required.' });
+  const html = wrapEmailHtmlDesignB(subject || 'Message from Dream2Fly', body);
+  res.json({ html });
+});
+
 // GET /api/tasks?name=&country=&from=&to=
 router.get('/', requireAuth, async (req, res) => {
   const { name, country, from, to } = req.query;
@@ -63,7 +106,7 @@ router.get('/me', requireAuth, requireRole('STUDENT'), async (req, res) => {
     where: { studentId: req.user.id },
     include: {
       assignedEmployee: { select: { fullName: true, phone: true, email: true, jobTitle: true } },
-      comments: { where: { channel: 'CANDIDATE' }, orderBy: { createdAt: 'asc' }, include: { author: { select: { fullName: true } } } },
+      comments: { where: { channel: 'CANDIDATE_FACING' }, orderBy: { createdAt: 'asc' }, include: { author: { select: { fullName: true } } } },
     },
     orderBy: { due: 'asc' },
   });
@@ -137,6 +180,14 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}" — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.` }
   });
   await logActivity(`${task.related} — task "${task.title}" status changed to "${status}".`, req.user.id);
+  notifyRecordWatchers({
+    assignedEmployeeId: task.assignedEmployeeId,
+    actorId: req.user.id,
+    title: `Task status updated`,
+    body: `${req.user.fullName} changed "${task.title}" (${task.related}) status to "${status}".`,
+    type: 'TASK_STATUS_CHANGED',
+    link: 'tasks',
+  }).catch(err => console.error('[tasks/:id/status] notifyRecordWatchers failed:', err.message));
 
   res.json({ task: updated, email, mailResult });
 });
@@ -177,6 +228,14 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
   await prisma.comment.create({ data: { taskId: task.id, isSystem: true, authorId: req.user.id, text: noteText } });
   await logActivity(`${task.related} — task "${task.title}" stage changed to "${stageLabel}".`, req.user.id);
   await notifyInternalTeam(updated, `Stage changed to "${stageLabel}".`, req.user.fullName);
+  notifyRecordWatchers({
+    assignedEmployeeId: task.assignedEmployeeId,
+    actorId: req.user.id,
+    title: `Task stage updated`,
+    body: `${req.user.fullName} moved "${task.title}" (${task.related}) to "${stageLabel}".`,
+    type: 'TASK_STAGE_CHANGED',
+    link: 'tasks',
+  }).catch(err => console.error('[tasks/:id/stage] notifyRecordWatchers failed:', err.message));
 
   res.json({ task: updated, email, candidateMailResult, candidateWhatsAppResult });
 });
@@ -188,7 +247,7 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
 // reads this first to know where things stand right now, without having
 // to scroll the whole comment thread.
 router.patch('/:id/overview', requireAuth, async (req, res) => {
-  const { overview, course, college, fees } = req.body;
+  const { overview, course, college, fees, applicationId, intake } = req.body;
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({
@@ -197,6 +256,8 @@ router.patch('/:id/overview', requireAuth, async (req, res) => {
       ...(overview !== undefined ? { overview } : {}),
       ...(course !== undefined ? { course } : {}),
       ...(college !== undefined ? { college } : {}),
+      ...(applicationId !== undefined ? { applicationId } : {}),
+      ...(intake !== undefined ? { intake } : {}),
       ...(fees !== undefined ? { fees } : {}),
     },
   });
@@ -240,10 +301,33 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
     if (!task.contactEmail) {
       return res.status(400).json({ error: 'Comment saved, but no email on file for this candidate — add one in Contact details to actually send it.', comment });
     }
-    mailResult = await sendMail({ to: task.contactEmail, subject: `Message from Dream2Fly regarding ${task.related}`, body: text });
+    mailResult = await sendMail({
+      to: task.contactEmail,
+      subject: `Message from Dream2Fly regarding ${task.related}`,
+      body: text,
+      attachmentFileName: attachmentName || undefined,
+      attachmentBase64: attachmentUrl || undefined,
+    });
   }
 
   await logActivity(`${task.related} — ${text}`, req.user.id);
+  notifyRecordWatchers({
+    assignedEmployeeId: task.assignedEmployeeId,
+    actorId: req.user.id,
+    title: `New comment on ${task.related}`,
+    body: `${req.user.fullName}: ${text.length > 100 ? text.slice(0, 100) + '…' : text}`,
+    type: 'TASK_COMMENT',
+    link: 'tasks',
+  }).catch(err => console.error('[tasks/:id/comments] notifyRecordWatchers failed:', err.message));
+  // Internal team notes stay in-app only — no email. Only a candidate-facing
+  // message (something that actually went out to the applicant) is worth
+  // an email to watchers; every internal back-and-forth getting its own
+  // email would burn through the daily send limit fast for no real benefit
+  // over the bell notification above.
+  if (channel === 'CANDIDATE_FACING') {
+    notifyCaseWatchersByEmail(task, 'Comment Received', req.user.id)
+      .catch(err => console.error('[tasks/:id/comments] notifyCaseWatchersByEmail failed:', err.message));
+  }
   res.status(201).json({ comment, mailResult });
 });
 

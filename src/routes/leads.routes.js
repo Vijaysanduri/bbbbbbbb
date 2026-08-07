@@ -3,7 +3,7 @@ const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail, renderTemplate } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
-const { createNotification } = require('../utils/notifications');
+const { createNotification, notifyRecordWatchers } = require('../utils/notifications');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -17,12 +17,17 @@ async function logActivity(text, actorId) {
 // Consultation" form calls. Always tagged source=WEBSITE regardless of
 // what the client sends, since anything submitted here genuinely came
 // from the website.
-// Notifies every Admin/Super Admin/Manager the moment a new lead comes in
-// — from the website or a Channel Partner — so leadership sees it
-// immediately, not just whenever someone happens to check the dashboard.
+// Emails Admin/Super Admin the moment a new lead comes in — from the
+// website or a Channel Partner — so leadership sees it immediately, not
+// just whenever someone happens to check the dashboard. Deliberately NOT
+// every staff member: the separate new-lead buzzer (banner + sound,
+// polling-based — see /leads/new-since) already alerts every signed-in
+// employee visually and audibly within 30 seconds, so they don't also
+// need an email for the same event. Keeping this list to leadership only
+// avoids burning through the daily email quota on high lead volume days.
 async function notifyLeadershipOfNewLead(lead, sourceLabel) {
   const staff = await prisma.user.findMany({
-    where: { role: { in: ['ADMIN', 'SUPER_ADMIN', 'MANAGER', 'HR', 'EMPLOYEE', 'COUNSELLOR'] }, active: true },
+    where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, active: true },
   });
   console.log(`[notifyLeadershipOfNewLead] Found ${staff.length} staff to notify for lead "${lead.name}":`, staff.map(p => p.email).join(', ') || '(none)');
   for (const person of staff) {
@@ -250,6 +255,14 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     data: { leadId: lead.id, isSystem: true, authorId: req.user.id, text: `Status changed to "${status}" — email ${mailResult.delivered ? 'sent' : 'logged'} to ${lead.name}.` }
   });
   await logActivity(`${lead.name} — status changed to "${status}".`, req.user.id);
+  notifyRecordWatchers({
+    assignedEmployeeId: lead.assignedEmployeeId,
+    actorId: req.user.id,
+    title: `Lead status updated`,
+    body: `${req.user.fullName} changed ${lead.name}'s status to "${status}".`,
+    type: 'LEAD_STATUS_CHANGED',
+    link: 'applicants',
+  }).catch(err => console.error('[leads/:id/status] notifyRecordWatchers failed:', err.message));
 
   res.json({ lead: updated, email, mailResult });
 });
@@ -300,10 +313,24 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
     if (!lead.contactEmail) {
       return res.status(400).json({ error: 'Comment saved, but no email on file for this lead — add one first.', comment });
     }
-    mailResult = await sendMail({ to: lead.contactEmail, subject: `Message from Dream2Fly regarding your enquiry`, body: text });
+    mailResult = await sendMail({
+      to: lead.contactEmail,
+      subject: `Message from Dream2Fly regarding your enquiry`,
+      body: text,
+      attachmentFileName: attachmentName || undefined,
+      attachmentBase64: attachmentUrl || undefined,
+    });
   }
 
   await logActivity(`${lead.name} — ${text}`, req.user.id);
+  notifyRecordWatchers({
+    assignedEmployeeId: lead.assignedEmployeeId,
+    actorId: req.user.id,
+    title: `New comment on ${lead.name}`,
+    body: `${req.user.fullName}: ${text.length > 100 ? text.slice(0, 100) + '…' : text}`,
+    type: 'LEAD_COMMENT',
+    link: 'applicants',
+  }).catch(err => console.error('[leads/:id/comments] notifyRecordWatchers failed:', err.message));
   res.status(201).json({ comment, mailResult });
 });
 
@@ -427,10 +454,20 @@ router.delete('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (r
 // the browser happens to have loaded).
 router.get('/stats/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const { employeeId, country } = req.query;
-  const fromStr = req.query.from || req.query.date || new Date().toISOString().slice(0, 10);
-  const toStr = req.query.to || req.query.date || new Date().toISOString().slice(0, 10);
-  const rangeStart = new Date(fromStr + 'T00:00:00.000Z');
-  const rangeEnd = new Date(toStr + 'T23:59:59.999Z');
+  const todayStr = new Date().toISOString().slice(0, 10);
+  // req.query values can arrive as arrays, empty strings, or garbage from a
+  // malformed request — any of which produced an "Invalid Date" that
+  // crashed this entire page for every admin. Coerce to a plain string
+  // and validate the resulting Date before using it, falling back to
+  // today's range rather than 500ing the whole Employees view.
+  const rawFrom = Array.isArray(req.query.from) ? req.query.from[0] : (req.query.from || req.query.date);
+  const rawTo = Array.isArray(req.query.to) ? req.query.to[0] : (req.query.to || req.query.date);
+  const fromStr = (typeof rawFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawFrom)) ? rawFrom : todayStr;
+  const toStr = (typeof rawTo === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawTo)) ? rawTo : todayStr;
+  let rangeStart = new Date(fromStr + 'T00:00:00.000Z');
+  let rangeEnd = new Date(toStr + 'T23:59:59.999Z');
+  if (isNaN(rangeStart.getTime())) rangeStart = new Date(todayStr + 'T00:00:00.000Z');
+  if (isNaN(rangeEnd.getTime())) rangeEnd = new Date(todayStr + 'T23:59:59.999Z');
 
   const employees = await prisma.user.findMany({
     where: { role: { in: ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'] }, active: true, ...(employeeId ? { id: employeeId } : {}) },
