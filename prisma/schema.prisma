@@ -225,6 +225,7 @@ model User {
   leaveRequests LeaveRequest[]
   loggedFollowUps FollowUp[] @relation("FollowUpLogger")
   uploadedDocuments InfoDocument[]
+  emailTemplates EmailTemplate[]
   payslips Payslip[] @relation("PayslipOwner")
   uploadedPayslips Payslip[] @relation("PayslipUploader")
   createdHolidays Holiday[]
@@ -1030,4 +1031,22 @@ model InfoDocument {
   uploadedById String?
   uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
   createdAt    DateTime @default(now())
+}
+
+// Reusable candidate-email templates, used from the "Quick template"
+// dropdown in the comment composer on both leads and tasks. Previously
+// this was a fixed, hardcoded set of 3 options in the frontend code —
+// this model lets any admin/staff member add, edit, or retire their own
+// (e.g. "Loan checklist", "Visa filing form") without needing a code
+// change and redeploy every time the wording needs updating.
+model EmailTemplate {
+  id          String   @id @default(cuid())
+  name        String   // shown in the dropdown, e.g. "Loan checklist"
+  subject     String
+  body        String   @db.Text
+  active      Boolean  @default(true)
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
