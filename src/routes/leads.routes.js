@@ -112,7 +112,7 @@ router.get('/', requireAuth, async (req, res) => {
     include: {
       history: { orderBy: { date: 'asc' } },
       followUps: { orderBy: { date: 'desc' }, include: { loggedBy: { select: { id: true, fullName: true } } } },
-      comments: { orderBy: { createdAt: 'asc' } },
+      comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
     },
