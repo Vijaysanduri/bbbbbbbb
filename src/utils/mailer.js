@@ -195,4 +195,37 @@ function renderQuickCandidateTemplate(template, name) {
   return { subject: t.subject, body: t.body.replace(/{{name}}/g, name) };
 }
 
-module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB };
+// "Case update" notification — sent when something happens on a case
+// (a comment posted, status/stage changed) to whoever should know about
+// it: the recipient's own name, then the case's key details in a fixed
+// block, and a link back to the portal to see the full thread — not the
+// comment's actual text, since the point is to prompt them to log in and
+// look, not to relay content by email. `recipientName` is whoever this
+// particular email is going TO (a sponsor, partner, or staff member —
+// not necessarily the student), `title` is the event type shown at the
+// bottom of the details block (e.g. "Comment Received", "Status Changed").
+function renderCaseUpdateTemplate({ recipientName, task, title, portalLink }) {
+  const subject = `Update on ${task.related}'s application — ${title}`;
+  const body =
+`Hi ${recipientName},
+There has been some activity on the application of
+Student's Name: ${task.related}
+Application Id: ${task.applicationId || '—'}
+Country: ${task.country || '—'}
+Institution: ${task.college || '—'}
+Program: ${task.course || '—'}
+Intake: ${task.intake || '—'}
+Status: ${task.stage || task.status || '—'}
+Title: ${title}
+
+Thank you for the update.
+
+Thanks,
+Applications Team
+
+Please do not reply to this email. To view the previous messages or leave a comment, click on:
+${portalLink || 'https://dream2fly.co.uk/D2fnew/login.html'}`;
+  return { subject, body };
+}
+
+module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB };
