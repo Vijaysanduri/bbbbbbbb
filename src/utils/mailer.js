@@ -224,7 +224,7 @@ Thanks,
 Applications Team
 
 Please do not reply to this email. To view the previous messages or leave a comment, click on:
-${portalLink || 'https://dream2fly.co.uk/D2fnew/login.html'}`;
+${portalLink || 'https://dream2fly.co.uk/login.html'}`;
   return { subject, body };
 }
 
