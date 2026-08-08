@@ -181,6 +181,32 @@ router.get('/me/dashboard-access', requireAuth, async (req, res) => {
 // GET /api/auth/employees — Admin/Super Admin, or anyone granted either
 // Admin-feature permission (both Resignations and Employee 360 need this
 // list for their dropdowns).
+// GET /api/auth/students-search?q=... — Admin/Super Admin/Employee/
+// Counsellor/Manager. Powers the student autocomplete in the payment
+// request form (and anywhere else staff need to find a student by name
+// or email without typing the exact address from memory). Deliberately
+// narrow — only id/fullName/email, none of the HR-sensitive fields
+// GET /employees exposes, so it's safe to open up to regular staff
+// instead of restricting it to Admin/Super Admin like that one is.
+router.get('/students-search', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.json([]);
+  const students = await prisma.user.findMany({
+    where: {
+      role: 'STUDENT',
+      active: true,
+      OR: [
+        { fullName: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+      ],
+    },
+    select: { id: true, fullName: true, email: true },
+    take: 8,
+    orderBy: { fullName: 'asc' },
+  });
+  res.json(students);
+});
+
 router.get('/employees', requireAuth, async (req, res) => {
   if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) {
     let allowed = false;
