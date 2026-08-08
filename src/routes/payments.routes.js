@@ -4,11 +4,36 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const { createRazorpayOrder, verifyPaymentSignature, isConfigured } = require('../utils/razorpay');
 const { rateLimiter } = require('../middleware/rateLimiter');
+const { notifyRecordWatchers } = require('../utils/notifications');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
 const verifyRateLimit = rateLimiter({ maxAttempts: 15, windowMs: 15 * 60 * 1000, message: 'Too many attempts. Please wait a few minutes and try again.' });
+
+// Payments aren't tied to a task directly (a payment belongs to a student,
+// not a case) — so to surface it where staff actually look (the task's
+// comment thread, the assigned employee's notification bell), this looks
+// up whichever task that student is linked to and posts there. If the
+// student isn't linked to any task yet, this quietly does nothing rather
+// than erroring — the payment itself is unaffected either way.
+async function notifyAndLogPaymentEvent(studentId, text, actorId) {
+  try {
+    const task = await prisma.task.findFirst({ where: { studentId } });
+    if (!task) return;
+    await prisma.comment.create({ data: { taskId: task.id, isSystem: true, text } });
+    await notifyRecordWatchers({
+      assignedEmployeeId: task.assignedEmployeeId,
+      actorId: actorId || null,
+      title: `Payment update — ${task.related}`,
+      body: text,
+      type: 'TASK_COMMENT',
+      link: 'tasks',
+    });
+  } catch (err) {
+    console.error('[notifyAndLogPaymentEvent] failed:', err.message);
+  }
+}
 
 // GET /api/payments/razorpay-status — anyone signed in. Lets the
 // frontend show "payments not yet configured" instead of a broken
@@ -34,6 +59,8 @@ router.post('/request', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOY
     subject: `Payment due: ${purpose}`,
     body: `Hi ${student.fullName},\n\nA payment of ₹${payment.amount.toFixed(2)} is due for "${purpose}". Please log in to your student portal to complete this via Razorpay.\n\nBest,\nDream2Fly`,
   });
+  notifyAndLogPaymentEvent(student.id, `Payment requested: ₹${payment.amount.toFixed(2)} for "${purpose}" (by ${req.user.fullName}).`, req.user.id)
+    .catch(err => console.error('[payments/request] notifyAndLogPaymentEvent failed:', err.message));
 
   res.status(201).json(payment);
 });
@@ -101,6 +128,8 @@ router.post('/:id/verify', requireAuth, requireRole('STUDENT'), verifyRateLimit,
       body: `${updated.student.fullName} has paid ₹${updated.amount.toFixed(2)} for "${updated.purpose}".`,
     });
   }
+  notifyAndLogPaymentEvent(updated.studentId, `Payment received: ₹${updated.amount.toFixed(2)} for "${updated.purpose}" — paid successfully.`, null)
+    .catch(err => console.error('[payments/verify] notifyAndLogPaymentEvent failed:', err.message));
 
   res.json(updated);
 });
