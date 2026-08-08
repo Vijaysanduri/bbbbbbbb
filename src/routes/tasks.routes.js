@@ -54,7 +54,7 @@ async function notifyCaseWatchersByEmail(task, title, actorId) {
   leadership.forEach(u => recipientIds.add(u.id));
   if (actorId) recipientIds.delete(actorId);
   const recipients = await prisma.user.findMany({ where: { id: { in: [...recipientIds] } }, select: { id: true, fullName: true, email: true } });
-  const portalLink = `https://dream2fly.co.uk/D2fnew/login.html`;
+  const portalLink = `https://dream2fly.co.uk/login.html`;
   for (const person of recipients) {
     const { subject, body } = renderCaseUpdateTemplate({ recipientName: person.fullName, task, title, portalLink });
     try {
@@ -64,6 +64,16 @@ async function notifyCaseWatchersByEmail(task, title, actorId) {
     }
   }
 }
+
+// GET /api/tasks/whatsapp-status — any signed-in staff member. Lets the
+// frontend show "WhatsApp isn't connected yet" wherever a "Via WhatsApp"
+// option is offered, instead of silently logging a message nobody ever
+// receives. Flips to true automatically the moment real WHATSAPP_API_URL
+// / WHATSAPP_API_TOKEN credentials are added — no frontend change needed
+// when that integration is actually set up.
+router.get('/whatsapp-status', requireAuth, (req, res) => {
+  res.json({ configured: !!(process.env.WHATSAPP_API_URL && process.env.WHATSAPP_API_TOKEN) });
+});
 
 // POST /api/tasks/email-preview — any signed-in staff member. Renders
 // the exact same branded HTML template a real candidate email would use
@@ -434,7 +444,7 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
     sendMail({
       to: studentEmail,
       subject: `Your Dream2Fly student portal is ready`,
-      body: `Hi ${task.related},\n\nYour Dream2Fly student portal has been set up — you can now track your application, message your counsellor, and manage documents online.\n\nPortal: https://dream2fly.co.uk/D2fnew/login.html\nEmail: ${studentEmail}\nPassword: ${plainPassword}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
+      body: `Hi ${task.related},\n\nYour Dream2Fly student portal has been set up — you can now track your application, message your counsellor, and manage documents online.\n\nPortal: https://dream2fly.co.uk/login.html\nEmail: ${studentEmail}\nPassword: ${plainPassword}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
     }).catch(err => console.error('[link-student] Welcome email failed:', err.message));
   }
 

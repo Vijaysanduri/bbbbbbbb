@@ -196,9 +196,15 @@ router.get('/employees', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'You do not have permission to do this.' });
     }
   }
+  // Defaults to active-only, matching every existing caller (assignee
+  // dropdowns, reporting structure, etc.) — those must never show a
+  // deactivated person as assignable. Only the account-management view
+  // (Enable/Disable, Reset Password) needs to see everyone, and passes
+  // ?includeInactive=1 explicitly to opt into that.
+  const includeInactive = req.query.includeInactive === '1';
   const employees = await prisma.user.findMany({
-    where: { active: true },
-    select: { id: true, fullName: true, email: true, role: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
+    where: includeInactive ? {} : { active: true },
+    select: { id: true, fullName: true, email: true, role: true, active: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
     orderBy: { fullName: 'asc' },
   });
   res.json(employees);
@@ -231,7 +237,7 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
   sendMail({
     to: email,
     subject: `Your Dream2Fly account is ready`,
-    body: `Hi ${fullName},\n\nYou've been added to Dream2Fly's system. Here's how to sign in:\n\nPortal: https://dream2fly.co.uk/D2fnew/login.html\nEmail: ${email}\nPassword: ${password}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
+    body: `Hi ${fullName},\n\nYou've been added to Dream2Fly's system. Here's how to sign in:\n\nPortal: https://dream2fly.co.uk/login.html\nEmail: ${email}\nPassword: ${password}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
   }).catch(err => console.error('[employees/create] Welcome email failed:', err.message));
   res.status(201).json({ id: created.id, fullName: created.fullName, email: created.email, role: created.role });
 });
@@ -279,6 +285,48 @@ router.patch('/employees/:id/deactivate', requireAuth, requireRole('ADMIN', 'SUP
   await prisma.user.update({ where: { id: req.params.id }, data: { active: false } });
   await logActivity(`${req.user.fullName} deactivated ${target.fullName}'s account.`, req.user.id);
   res.json({ success: true });
+});
+
+// PATCH /api/auth/employees/:id/reactivate — Admin/Super Admin only.
+// Undoes a deactivation — the account can sign in again immediately.
+router.patch('/employees/:id/reactivate', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  await prisma.user.update({ where: { id: req.params.id }, data: { active: true } });
+  await logActivity(`${req.user.fullName} re-enabled ${target.fullName}'s account.`, req.user.id);
+  res.json({ success: true });
+});
+
+// PATCH /api/auth/employees/:id/reset-password — resets someone else's
+// password (as opposed to /change-password, which is for your own).
+// Body: { newPassword? } — if omitted, a random one is generated. Either
+// way the person is emailed their new password. Permission is tiered:
+// resetting a STUDENT's password is allowed for any staff member who
+// regularly works with students (Employee/Counsellor/Manager/Admin/Super
+// Admin) — they're often the ones fielding "I can't log in" directly from
+// a candidate. Resetting anyone else's (staff/partner) password is
+// restricted to Admin/Super Admin, since that's a more sensitive action.
+router.patch('/employees/:id/reset-password', requireAuth, async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  const allowedRoles = target.role === 'STUDENT'
+    ? ['ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER']
+    : ['ADMIN', 'SUPER_ADMIN'];
+  if (!allowedRoles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'You do not have permission to reset this account\'s password.' });
+  }
+  const { newPassword } = req.body;
+  const finalPassword = newPassword && newPassword.length >= 8 ? newPassword : Math.random().toString(36).slice(-10) + 'A1!';
+  const passwordHash = await bcrypt.hash(finalPassword, 10);
+  await prisma.user.update({ where: { id: target.id }, data: { passwordHash } });
+  await logActivity(`${req.user.fullName} reset ${target.fullName}'s password.`, req.user.id);
+  const { sendMail } = require('../utils/mailer');
+  sendMail({
+    to: target.email,
+    subject: `Your Dream2Fly password has been reset`,
+    body: `Hi ${target.fullName},\n\nYour password was reset by ${req.user.fullName}. Here's your new password:\n\n${finalPassword}\n\nPlease sign in and change it to something memorable as soon as you can.\n\nPortal: https://dream2fly.co.uk/login.html\n\nIf this wasn't expected, contact your admin right away.\n\nBest,\nDream2Fly`,
+  }).catch(err => console.error('[reset-password] Email failed:', err.message));
+  res.json({ success: true, newPassword: finalPassword });
 });
 
 // PATCH /api/auth/employees/:id/reporting-manager — Admin/Super Admin only.

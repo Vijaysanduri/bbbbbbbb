@@ -85,11 +85,14 @@ router.post('/:id/verify', requireAuth, requireRole('STUDENT'), verifyRateLimit,
     include: { student: true, requestedBy: true },
   });
 
-  // Alert the student and whoever requested the payment.
+  // Alert the student and whoever requested the payment. Amount and
+  // purpose are pulled straight from this payment record — never
+  // hardcoded — so the confirmation always matches whatever was actually
+  // requested and paid, however that payment was initiated.
   await sendMail({
     to: updated.student.email,
-    subject: `Payment received: ${updated.purpose}`,
-    body: `Hi ${updated.student.fullName},\n\nWe've received your payment of ₹${updated.amount.toFixed(2)} for "${updated.purpose}". Thank you!\n\nBest,\nDream2Fly`,
+    subject: `Payment confirmed: ${updated.purpose} — ₹${updated.amount.toFixed(2)}`,
+    body: `Hi ${updated.student.fullName},\n\nThis confirms we've received your payment.\n\nAmount Paid: ₹${updated.amount.toFixed(2)}\nPurpose: ${updated.purpose}\nDate: ${new Date().toLocaleDateString('en-GB')}\nReference: ${updated.id}\n\nThank you!\n\nBest,\nDream2Fly`,
   });
   if (updated.requestedBy) {
     await sendMail({
