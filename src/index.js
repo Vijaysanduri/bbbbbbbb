@@ -11,6 +11,8 @@ const attendanceRoutes = require('./routes/attendance.routes');
 const leavesRoutes = require('./routes/leaves.routes');
 const infoDocumentsRoutes = require('./routes/infoDocuments.routes');
 const emailTemplatesRoutes = require('./routes/emailTemplates.routes');
+const careerApplicationsRoutes = require('./routes/careerApplications.routes');
+const taskStagesRoutes = require('./routes/taskStages.routes');
 const payslipsRoutes = require('./routes/payslips.routes');
 const siteContentRoutes = require('./routes/siteContent.routes');
 const payrollRoutes = require('./routes/payroll.routes');
@@ -67,6 +69,8 @@ app.use('/api/attendance', attendanceRoutes);
 app.use('/api/leaves', leavesRoutes);
 app.use('/api/info-documents', infoDocumentsRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
+app.use('/api/career-applications', careerApplicationsRoutes);
+app.use('/api/task-stages', taskStagesRoutes);
 app.use('/api/payslips', payslipsRoutes);
 app.use('/api/site-content', siteContentRoutes);
 app.use('/api/payroll', payrollRoutes);
@@ -124,6 +128,7 @@ app.listen(PORT, () => {
   // meant to be reviewed and customized via Manage Templates, not sent
   // to a candidate as-is.
   seedStarterEmailTemplates();
+  seedStarterTaskStages();
 });
 
 async function seedStarterEmailTemplates() {
@@ -154,5 +159,35 @@ async function seedStarterEmailTemplates() {
     console.log(`Seeded ${starters.length} starter email templates.`);
   } catch (err) {
     console.error('Could not seed starter email templates:', err.message);
+  }
+}
+
+async function seedStarterTaskStages() {
+  const { PrismaClient } = require('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    const count = await prisma.taskStageOption.count();
+    if (count > 0) return;
+    // These first 13 are the EXACT original enum key strings this project
+    // used before stages became admin-editable — preserving them exactly
+    // (not converting to nicer display names) keeps every existing task's
+    // stored `stage` value valid, and keeps the stage-change email
+    // templates in utils/mailer.js (keyed on these same strings) matching
+    // correctly. New stages added from here on can be named however
+    // makes sense — "Offer Received" is the one explicitly requested that
+    // didn't already exist under any name.
+    const starters = [
+      'DOC_CHECKLIST_SENT', 'WAITING_FOR_DOCUMENTS', 'DOCUMENTS_RECEIVED',
+      'SUBMITTED_TO_UNIVERSITY', 'WAITING_UNIVERSITY_RESPONSE',
+      'PENDING_FROM_CANDIDATE', 'PENDING_FROM_CLIENT', 'PENDING_FROM_UNIVERSITY',
+      'INTERVIEW_STAGE', 'LOAN_STAGE', 'VISA_STAGE', 'VISA_APPROVED', 'COMPLETED',
+      'Offer Received',
+    ];
+    for (let i = 0; i < starters.length; i++) {
+      await prisma.taskStageOption.create({ data: { name: starters[i], order: i } });
+    }
+    console.log(`Seeded ${starters.length} starter task stages.`);
+  } catch (err) {
+    console.error('Could not seed starter task stages:', err.message);
   }
 }
