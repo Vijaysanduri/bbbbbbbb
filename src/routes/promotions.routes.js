@@ -15,7 +15,7 @@ const prisma = new PrismaClient();
 // gets both. Failures for individual recipients don't stop the batch;
 // the response reports how many actually went out.
 router.post('/send', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { subject, body, recipients, recipientSource } = req.body;
+  const { subject, body, recipients, recipientSource, attachmentFileName, attachmentBase64 } = req.body;
   if (!subject || !body) return res.status(400).json({ error: 'subject and body are required.' });
   if (!Array.isArray(recipients) || recipients.length === 0) return res.status(400).json({ error: 'At least one recipient is required.' });
   if (recipients.length > 2000) return res.status(400).json({ error: 'Please send to 2000 recipients or fewer at a time.' });
@@ -24,7 +24,11 @@ router.post('/send', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (re
   for (const r of recipients) {
     if (r.email) {
       try {
-        await sendMail({ to: r.email, subject, body: body.replace(/\{name\}/g, r.name || 'there') });
+        await sendMail({
+          to: r.email, subject, body: body.replace(/\{name\}/g, r.name || 'there'),
+          attachmentFileName: attachmentFileName || undefined,
+          attachmentBase64: attachmentBase64 || undefined,
+        });
         emailsSent++;
       } catch (err) { /* one bad address shouldn't stop the batch */ }
     }
@@ -38,7 +42,7 @@ router.post('/send', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (re
 
   const promotion = await prisma.promotion.create({
     data: {
-      subject, body, recipientSource: recipientSource === 'UPLOAD' ? 'UPLOAD' : 'LEADS',
+      subject, body, recipientSource: ['LEADS', 'UPLOAD', 'EMPLOYEE', 'CHANNEL_PARTNER', 'STUDENT', 'COLLABORATION'].includes(recipientSource) ? recipientSource : 'LEADS',
       recipientCount: recipients.length, emailsSent, whatsappSent, sentById: req.user.id,
     },
   });

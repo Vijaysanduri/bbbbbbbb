@@ -2,6 +2,7 @@ const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
+const { createNotification } = require('../utils/notifications');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -42,6 +43,13 @@ router.patch('/:id/decide', requireAuth, async (req, res) => {
     subject: `Your leave request has been ${status.toLowerCase()}`,
     body: `Hi ${leave.user.fullName},\n\nYour ${leave.leaveType.toLowerCase()} leave request (${leave.fromDate.toISOString().slice(0,10)} to ${leave.toDate.toISOString().slice(0,10)}) has been ${status.toLowerCase()} by ${req.user.fullName}.\n\nBest,\nDream2Fly HR`,
   });
+  createNotification(
+    leave.user.id,
+    `Leave request ${status.toLowerCase()}`,
+    `Your ${leave.leaveType.toLowerCase()} leave (${leave.fromDate.toISOString().slice(0,10)} to ${leave.toDate.toISOString().slice(0,10)}) was ${status.toLowerCase()} by ${req.user.fullName}.`,
+    'GENERAL',
+    'leave'
+  ).catch(err => console.error('[leaves/decide] createNotification failed:', err.message));
   res.json(updated);
 });
 
@@ -89,6 +97,21 @@ router.post('/', requireAuth, async (req, res) => {
         ? `Hi ${person.fullName},\n\nYour ${leave.leaveType.toLowerCase()} leave request (${fromDate} to ${toDate}) has been submitted and is pending approval.\n\nReason: ${reason}\n\nBest,\nDream2Fly HR`
         : `Hi ${person.fullName},\n\n${applicant.fullName} has applied for ${leave.leaveType.toLowerCase()} leave (${fromDate} to ${toDate}).\n\nReason: ${reason}\n\nPlease review in the Admin dashboard under Leave Management.\n\nBest,\nDream2Fly HR`,
     });
+    // Bell notification alongside the email — every other part of this
+    // app (payments, leads, tasks, career applications) gets both, leave
+    // was previously email-only. The applicant always views this from
+    // their own Employee dashboard ("leave"); a reviewer (manager/HR) is
+    // assumed to be reviewing from the Admin dashboard ("adm-leave") —
+    // the common case, though a non-admin reporting manager who only has
+    // Employee dashboard access would see the notification but the link
+    // itself wouldn't resolve there, a minor edge case.
+    createNotification(
+      person.id,
+      isApplicant ? `Leave request submitted` : `${applicant.fullName} applied for leave`,
+      isApplicant ? `Your ${leave.leaveType.toLowerCase()} leave (${fromDate} to ${toDate}) is pending approval.` : `${leave.leaveType.toLowerCase()} leave, ${fromDate} to ${toDate}.`,
+      'GENERAL',
+      isApplicant ? 'leave' : 'adm-leave'
+    ).catch(err => console.error('[leaves/submit] createNotification failed:', err.message));
   }
 
   res.status(201).json(leave);

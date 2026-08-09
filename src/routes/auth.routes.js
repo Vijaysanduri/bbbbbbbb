@@ -230,7 +230,7 @@ router.get('/employees', requireAuth, async (req, res) => {
   const includeInactive = req.query.includeInactive === '1';
   const employees = await prisma.user.findMany({
     where: includeInactive ? {} : { active: true },
-    select: { id: true, fullName: true, email: true, role: true, active: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
+    select: { id: true, fullName: true, email: true, phone: true, role: true, active: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
     orderBy: { fullName: 'asc' },
   });
   res.json(employees);

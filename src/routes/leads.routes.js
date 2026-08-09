@@ -1,7 +1,7 @@
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { sendMail, renderTemplate } = require('../utils/mailer');
+const { sendMail, renderTemplate, renderQuickCandidateTemplate } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
 const { createNotification, notifyRecordWatchers } = require('../utils/notifications');
 
@@ -341,6 +341,41 @@ router.post('/:id/followups', requireAuth, async (req, res) => {
   await prisma.comment.create({ data: { leadId: lead.id, authorId: req.user.id, text: `[${type}]${tag ? ' (' + tag.replace(/_/g, ' ') + ')' : ''} ${note}` } });
   await logActivity(`${lead.name} — ${type.toLowerCase()} logged${tag ? ' — ' + tag.replace(/_/g, ' ').toLowerCase() : ''}: ${note}`, req.user.id);
   res.status(201).json(followUp);
+});
+
+// POST /api/leads/:id/notify-candidate — Via email, WhatsApp, or both.
+// Mirrors POST /api/tasks/:id/notify-candidate exactly, so a lead gets
+// the same tracked communication a task does — the only reason this
+// didn't already exist is that WhatsApp support was originally only
+// built for tasks; this closes that gap so a candidate is fully tracked
+// whether they're still a lead or have already been converted.
+router.post('/:id/notify-candidate', requireAuth, async (req, res) => {
+  const { via, template, subject: customSubject, body: customBody } = req.body;
+  const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+
+  const defaultTemplate = renderQuickCandidateTemplate(template, lead.name);
+  const subject = (customSubject && customSubject.trim()) || defaultTemplate.subject;
+  const body = (customBody && customBody.trim()) || defaultTemplate.body;
+  let mailResult = { delivered: false, skipped: true };
+  let whatsAppResult = { delivered: false, skipped: true };
+
+  if (via === 'email' || via === 'both') {
+    if (!lead.contactEmail) return res.status(400).json({ error: 'No email address on file for this candidate yet — add one first.' });
+    mailResult = await sendMail({ to: lead.contactEmail, subject, body });
+  }
+  if (via === 'whatsapp' || via === 'both') {
+    const number = lead.whatsappNumber || lead.contactPhone;
+    if (!number) return res.status(400).json({ error: 'No phone number on file for this candidate yet — add one first.' });
+    whatsAppResult = await sendWhatsApp({ to: number, message: subject + '\n\n' + body });
+  }
+
+  await prisma.comment.create({
+    data: { leadId: lead.id, isSystem: true, authorId: req.user.id, text: `Sent "${template.replace(/_/g, ' ')}" message to candidate via ${via} — email ${mailResult.delivered ? 'sent' : mailResult.skipped ? 'skipped' : 'logged'}, WhatsApp ${whatsAppResult.delivered ? 'sent' : whatsAppResult.skipped ? 'skipped' : 'logged'}.` }
+  });
+  await logActivity(`${lead.name} — sent "${template.replace(/_/g, ' ')}" message via ${via}.`, req.user.id);
+
+  res.json({ subject, body, mailResult, whatsAppResult });
 });
 
 // POST /api/leads/:id/comments

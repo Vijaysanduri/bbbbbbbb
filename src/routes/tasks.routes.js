@@ -138,8 +138,51 @@ router.get('/:id', requireAuth, async (req, res) => {
   res.json(task);
 });
 
-// POST /api/tasks
-// Body: { title, related, country, due, priority }
+// GET /api/tasks/:id/overview — "Candidate Overview": one consolidated
+// read-only summary of everything about this case — university/course
+// details, loan, visa, and every payment on file — with dates
+// throughout. Any staff role can view this (same access as the task
+// itself), including whichever employee is actually handling this
+// candidate, not just Admin.
+//
+// Payments are looked up via the task's linked studentId, since that's
+// the only reliable link between a Task and the Payment records made
+// through that student's portal login — a task with no linked student
+// account yet simply has no payments to show, which is accurate (they
+// couldn't have paid anything without a portal login to pay through).
+router.get('/:id/overview', requireAuth, async (req, res) => {
+  const task = await prisma.task.findUnique({
+    where: { id: req.params.id },
+    include: { assignedEmployee: { select: { fullName: true } }, student: { select: { fullName: true, email: true } } },
+  });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+
+  const payments = task.studentId
+    ? await prisma.payment.findMany({
+        where: { studentId: task.studentId },
+        select: { id: true, purpose: true, amount: true, status: true, createdAt: true, paidAt: true, receiptNumber: true },
+        orderBy: { createdAt: 'desc' },
+      })
+    : [];
+
+  res.json({
+    task: {
+      id: task.id, taskNumber: task.taskNumber, related: task.related, country: task.country, due: task.due,
+      stage: task.stage, status: task.status, assignedEmployeeName: task.assignedEmployee ? task.assignedEmployee.fullName : null,
+      course: task.course, college: task.college, fees: task.fees, applicationId: task.applicationId, intake: task.intake,
+      studentLinked: !!task.studentId, studentEmail: task.student ? task.student.email : null,
+    },
+    loan: {
+      bankName: task.loanBankName, status: task.loanStatus, officialName: task.loanOfficialName,
+      officialContact: task.loanOfficialContact, amount: task.loanAmount, referenceNumber: task.loanReferenceNumber, notes: task.loanNotes,
+    },
+    visa: {
+      type: task.visaType, referenceNumber: task.visaReferenceNumber,
+      filedDate: task.visaFiledDate, approvedDate: task.visaApprovedDate, notes: task.visaNotes,
+    },
+    payments,
+  });
+});
 router.post('/', requireAuth, async (req, res) => {
   const { title, related, country, due, priority, contactPhone, contactEmail } = req.body;
   if (!title || !related || !country || !due) {
@@ -215,6 +258,15 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
 router.patch('/:id/stage', requireAuth, async (req, res) => {
   const { stage, notifyCandidate, notifyCandidateVia } = req.body;
   if (!stage) return res.status(400).json({ error: 'stage is required.' });
+  // Stage used to be a Postgres enum, so the database itself rejected an
+  // invalid value. Now that it's a plain string (so Admin/Super Admin can
+  // add or retire stages without a deploy), that safety net is gone —
+  // this replaces it at the application layer. Checking existence rather
+  // than active:true specifically, since a task legitimately already
+  // sitting on a since-retired stage shouldn't become impossible to
+  // re-save if nothing else about it changed.
+  const validStage = await prisma.taskStageOption.findUnique({ where: { name: stage } });
+  if (!validStage) return res.status(400).json({ error: `"${stage}" isn't a recognized stage. Add it first under Manage Stages if it's meant to be new.` });
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
@@ -227,10 +279,18 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
   if (notifyCandidate) {
     const via = notifyCandidateVia || 'email';
     if (via === 'email' || via === 'both') {
-      candidateMailResult = await sendMail({ to: `${task.related.replace(/\s+/g, '.').toLowerCase()}@example.com`, subject: email.subject, body: email.body });
+      if (!task.contactEmail) {
+        candidateMailResult = { delivered: false, skipped: true, reason: 'No email on file for this candidate.' };
+      } else {
+        candidateMailResult = await sendMail({ to: task.contactEmail, subject: email.subject, body: email.body });
+      }
     }
     if (via === 'whatsapp' || via === 'both') {
-      candidateWhatsAppResult = await sendWhatsApp({ to: task.related, message: email.subject + '\n\n' + email.body });
+      if (!task.contactPhone) {
+        candidateWhatsAppResult = { delivered: false, skipped: true, reason: 'No phone on file for this candidate.' };
+      } else {
+        candidateWhatsAppResult = await sendWhatsApp({ to: task.contactPhone, message: email.subject + '\n\n' + email.body });
+      }
     }
   }
 
@@ -284,6 +344,40 @@ router.patch('/:id/interview-notes', requireAuth, async (req, res) => {
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: task.id }, data: { interviewNotes } });
   await logActivity(`${task.related} — interview notes updated.`, req.user.id);
+  res.json(updated);
+});
+
+// PATCH /api/tasks/:id/loan — the Loan tab in the Task modal. Overwrites
+// in full, same "always-current, not a log" pattern as overview/
+// interview-notes — the comment thread already captures history if
+// someone wants to know what changed and when.
+router.patch('/:id/loan', requireAuth, async (req, res) => {
+  const { loanBankName, loanOfficialName, loanOfficialContact, loanAmount, loanReferenceNumber, loanStatus, loanNotes } = req.body;
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: { loanBankName, loanOfficialName, loanOfficialContact, loanAmount, loanReferenceNumber, loanStatus, loanNotes },
+  });
+  await logActivity(`${task.related} — loan details updated.`, req.user.id);
+  res.json(updated);
+});
+
+// PATCH /api/tasks/:id/visa — the Visa tab in the Task modal, same
+// pattern as /loan above.
+router.patch('/:id/visa', requireAuth, async (req, res) => {
+  const { visaType, visaReferenceNumber, visaFiledDate, visaApprovedDate, visaNotes } = req.body;
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: {
+      visaType, visaReferenceNumber, visaNotes,
+      visaFiledDate: visaFiledDate ? new Date(visaFiledDate) : null,
+      visaApprovedDate: visaApprovedDate ? new Date(visaApprovedDate) : null,
+    },
+  });
+  await logActivity(`${task.related} — visa details updated.`, req.user.id);
   res.json(updated);
 });
 
