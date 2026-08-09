@@ -62,20 +62,19 @@ enum Priority {
   HIGH
 }
 
-enum TaskStage {
-  DOC_CHECKLIST_SENT
-  WAITING_FOR_DOCUMENTS
-  DOCUMENTS_RECEIVED
-  SUBMITTED_TO_UNIVERSITY
-  WAITING_UNIVERSITY_RESPONSE
-  PENDING_FROM_CANDIDATE
-  PENDING_FROM_CLIENT
-  PENDING_FROM_UNIVERSITY
-  INTERVIEW_STAGE
-  LOAN_STAGE
-  VISA_STAGE
-  VISA_APPROVED
-  COMPLETED
+// Admin-manageable task stages — replaces the old hardcoded TaskStage
+// enum. Enums in Postgres can't be added to or removed from without a
+// schema migration (a real code deploy), which is exactly the problem:
+// Admin/Super Admin need to add or retire a stage themselves, on the
+// fly, without waiting on a deploy. This table is that — Task.stage is
+// now a plain string matching one of these `name` values, validated at
+// the application layer instead of the database layer.
+model TaskStageOption {
+  id        String   @id @default(cuid())
+  name      String   @unique // e.g. "Loan in Progress" — this exact string is what gets stored on Task.stage
+  order     Int      @default(0) // controls dropdown/display order
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
 }
 
 enum LeadSource {
@@ -121,7 +120,7 @@ model Promotion {
   id              String   @id @default(cuid())
   subject         String
   body            String   @db.Text
-  recipientSource String   // "LEADS" | "UPLOAD"
+  recipientSource String   // "LEADS" | "UPLOAD" | "EMPLOYEE" | "CHANNEL_PARTNER" | "STUDENT" | "COLLABORATION"
   recipientCount  Int
   emailsSent      Int      @default(0)
   whatsappSent    Int      @default(0)
@@ -153,6 +152,27 @@ model Payment {
   requestedBy        User?         @relation("StaffPaymentRequests", fields: [requestedById], references: [id])
   createdAt          DateTime      @default(now())
   paidAt             DateTime?
+
+  // Human-readable sequential number (e.g. "D2F-2026-000123") — generated
+  // once, at the moment a payment succeeds. Distinct from the internal
+  // cuid `id` above, which is fine for the database and API calls but
+  // useless for a student or accountant trying to reference "which
+  // payment" in an email or conversation.
+  receiptNumber      String?       @unique
+  // The generated PDF receipt itself, stored as base64 — same pattern
+  // already used elsewhere in this app (InfoDocument.fileData,
+  // Comment.attachmentUrl) rather than a separate file-storage service,
+  // since nothing here has needed one yet. Only set once payment succeeds.
+  receiptPdf         String?       @db.Text
+
+  // Internal staff notes — not shown to the student, purely for the team's
+  // own tracking ("refunded partially on 12 Aug", "student disputed
+  // amount, resolved by phone"). Free text, editable by whoever's
+  // handling the case.
+  remarks            String?       @db.Text
+  remarksUpdatedById String?
+  remarksUpdatedBy   User?         @relation("PaymentRemarksEditor", fields: [remarksUpdatedById], references: [id])
+  remarksUpdatedAt   DateTime?
 }
 
 // A per-user in-app alert — task/lead assignments, documents needing
@@ -249,6 +269,8 @@ model User {
   sentPromotions                 Promotion[]
   payments                       Payment[] @relation("StudentPayments")
   requestedPayments              Payment[] @relation("StaffPaymentRequests")
+  paymentRemarksEdited           Payment[] @relation("PaymentRemarksEditor")
+  reviewedCareerApplications     CareerApplication[] @relation("CareerApplicationReviewer")
   notifications                  Notification[]
   resignations              Resignation[] @relation("ResigningEmployee")
   reviewedResignations      Resignation[] @relation("ResignationReviewer")
@@ -407,7 +429,29 @@ model Task {
   // reaches the interview stage, without mixing it into the general status summary.
   interviewNotes String? @db.Text
 
-  stage TaskStage?
+  // Loan tracking — a dedicated tab in the Task modal once a case reaches
+  // the loan stage. Kept as flat fields on Task (not a separate related
+  // model) since it's genuinely 1:1 per case, same reasoning as course/
+  // college/fees above — no need for the join overhead of a separate table.
+  loanBankName        String?
+  loanOfficialName     String?
+  loanOfficialContact String?
+  loanAmount          String?
+  loanReferenceNumber String?
+  loanStatus          String? // free text, e.g. "Applied", "Under Review", "Approved", "Disbursed", "Rejected" — deliberately not an enum, same reasoning as stage: shouldn't need a deploy to add a new loan status
+  loanNotes           String? @db.Text
+
+  // Visa tracking — same reasoning as loan fields above: flat on Task
+  // since it's 1:1 per case, and gives the Candidate Overview actual
+  // dates to show rather than just inferring "visa stage" from the
+  // generic stage field with no timestamp of its own.
+  visaType             String? // e.g. "Student Visa - Tier 4", "Skilled Worker"
+  visaReferenceNumber String?
+  visaFiledDate        DateTime?
+  visaApprovedDate     DateTime?
+  visaNotes            String? @db.Text
+
+  stage String?
 
   assignedEmployeeId String?
   assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
@@ -1049,4 +1093,26 @@ model EmailTemplate {
   createdBy   User?    @relation(fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+// A public-facing application — someone wanting to join as an employee,
+// become a channel partner, or propose a collaboration, submitted via a
+// form on the website (no login required, same pattern as the public
+// lead-registration form). This is deliberately a separate pipeline from
+// the existing "Add Employee" flow in Admin — that direct-add path stays
+// exactly as it was, for when Admin/Super Admin already knows who they
+// want to add. This model exists for the other direction: someone
+// reaching out first, that Admin then reviews and decides on.
+model CareerApplication {
+  id           String    @id @default(cuid())
+  category     String    // "EMPLOYEE" | "CHANNEL_PARTNER" | "COLLABORATION"
+  fullName     String
+  email        String
+  phone        String?
+  message      String?   @db.Text // free-text: role interest / business background / collab proposal — kept as one flexible field rather than per-category structured fields, since the ask was for "basic details", not a long form
+  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  reviewedById String?
+  reviewedBy   User?     @relation("CareerApplicationReviewer", fields: [reviewedById], references: [id])
+  reviewedAt   DateTime?
+  createdAt    DateTime  @default(now())
 }
