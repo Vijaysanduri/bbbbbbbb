@@ -417,6 +417,19 @@ model Task {
   fees    String?
   overview String? @db.Text
 
+  // Reference contact — for when the channel partner who referred this
+  // candidate isn't comfortable using their own portal login (e.g. not
+  // literate in reading/navigating a web app), Admin/Super Admin can
+  // record a reference person's name and phone here instead. The name
+  // is visible to whichever employee is handling the case — the phone
+  // number deliberately is not; only Admin/Super Admin can see or set
+  // it, enforced server-side in the GET endpoints below, not just
+  // hidden in the UI, since hiding a field in the frontend alone
+  // wouldn't stop anyone from reading it directly out of the API
+  // response.
+  referenceName  String?
+  referencePhone String?
+
   // Application reference number and intake term, e.g. "98887/25-26" and
   // "Sep, 2026" — shown on the case-update notification email so whoever
   // receives it (candidate, sponsor, or partner) can identify the
