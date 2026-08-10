@@ -89,6 +89,20 @@ router.post('/email-preview', requireAuth, (req, res) => {
 });
 
 // GET /api/tasks?name=&country=&from=&to=
+// Strips referencePhone unless the requester is Admin/Super Admin —
+// applied after the query rather than in `select`, since everything
+// else about a task is already fully visible to any staff role, and
+// this is the one deliberate exception. Doing this server-side (not
+// just hiding it in the frontend) means the phone number genuinely
+// never reaches an Employee's browser, not just stays unrendered there.
+function maskReferencePhone(task, requesterRole) {
+  if (!task) return task;
+  if (!['ADMIN', 'SUPER_ADMIN'].includes(requesterRole)) {
+    task.referencePhone = null;
+  }
+  return task;
+}
+
 router.get('/', requireAuth, async (req, res) => {
   const { name, country, from, to } = req.query;
   const where = {
@@ -105,7 +119,7 @@ router.get('/', requireAuth, async (req, res) => {
     },
     orderBy: { due: 'asc' }
   });
-  res.json(tasks);
+  res.json(tasks.map(t => maskReferencePhone(t, req.user.role)));
 });
 
 // GET /api/tasks/me — Student only. Their own linked case(s), with the
@@ -121,7 +135,10 @@ router.get('/me', requireAuth, requireRole('STUDENT'), async (req, res) => {
     },
     orderBy: { due: 'asc' },
   });
-  res.json(tasks);
+  // A student has no business seeing the partner reference contact at
+  // all — this isn't information about their own case that concerns
+  // them, it's an internal note about who referred them.
+  res.json(tasks.map(t => { t.referenceName = null; t.referencePhone = null; return t; }));
 });
 
 // GET /api/tasks/:id
@@ -135,7 +152,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
   });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
-  res.json(task);
+  res.json(maskReferencePhone(task, req.user.role));
 });
 
 // GET /api/tasks/:id/overview — "Candidate Overview": one consolidated
@@ -351,6 +368,23 @@ router.patch('/:id/interview-notes', requireAuth, async (req, res) => {
 // in full, same "always-current, not a log" pattern as overview/
 // interview-notes — the comment thread already captures history if
 // someone wants to know what changed and when.
+// PATCH /api/tasks/:id/reference — Admin/Super Admin only. For when the
+// referring channel partner isn't comfortable using their own portal
+// login — a reference contact recorded here instead. Only Admin/Super
+// Admin can set or view the phone number (see maskReferencePhone
+// above); the name is visible to whichever employee handles the case.
+router.patch('/:id/reference', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { referenceName, referencePhone } = req.body;
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: { referenceName, referencePhone },
+  });
+  await logActivity(`${task.related} — reference contact updated.`, req.user.id);
+  res.json(updated);
+});
+
 router.patch('/:id/loan', requireAuth, async (req, res) => {
   const { loanBankName, loanOfficialName, loanOfficialContact, loanAmount, loanReferenceNumber, loanStatus, loanNotes } = req.body;
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
