@@ -58,7 +58,7 @@ router.post('/request', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOY
   await sendMail({
     to: student.email,
     subject: `Payment due: ${purpose}`,
-    body: `Hi ${student.fullName},\n\nA payment of ₹${payment.amount.toFixed(2)} is due for "${purpose}". Please log in to your student portal to complete this via Razorpay.\n\nBest,\nDream2Fly`,
+    body: `Hi ${student.fullName},\n\nA payment of ₹${payment.amount.toFixed(2)} is due for "${purpose}". Please log in to your student portal to complete this via Razorpay.\n\nPlease note: this payment is non-refundable once processed, in accordance with Dream2Fly's company policy.\n\nBest,\nDream2Fly\n\n© ${new Date().getFullYear()} Dream2Fly Consulting Services Ltd. All rights reserved.`,
   });
   notifyAndLogPaymentEvent(student.id, `Payment requested: ₹${payment.amount.toFixed(2)} for "${purpose}" (by ${req.user.fullName}).`, req.user.id)
     .catch(err => console.error('[payments/request] notifyAndLogPaymentEvent failed:', err.message));
@@ -150,7 +150,7 @@ router.post('/:id/verify', requireAuth, requireRole('STUDENT'), verifyRateLimit,
     await sendMail({
       to: updated.student.email,
       subject: `Payment confirmed: ${updated.purpose} — ₹${updated.amount.toFixed(2)}`,
-      body: `Hi ${updated.student.fullName},\n\nThis confirms we've received your payment. Your receipt is attached.\n\nReceipt No: ${receiptNumber}\nAmount Paid: ₹${updated.amount.toFixed(2)}\nPurpose: ${updated.purpose}\nDate: ${new Date().toLocaleDateString('en-GB')}\n\nThank you!\n\nBest,\nDream2Fly`,
+      body: `Hi ${updated.student.fullName},\n\nThis confirms we've received your payment. Your receipt is attached.\n\nReceipt No: ${receiptNumber}\nAmount Paid: ₹${updated.amount.toFixed(2)}\nPurpose: ${updated.purpose}\nDate: ${new Date().toLocaleDateString('en-GB')}\n\nThank you!\n\nThis payment is non-refundable once processed, in accordance with Dream2Fly's company policy.\n\nBest,\nDream2Fly\n\n© ${new Date().getFullYear()} Dream2Fly Consulting Services Ltd. All rights reserved.`,
       ...receiptAttachment,
     });
     if (updated.requestedBy) {

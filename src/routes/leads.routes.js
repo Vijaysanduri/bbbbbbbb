@@ -51,7 +51,7 @@ async function notifyLeadershipOfNewLead(lead, sourceLabel) {
 // comes in — so the candidate hears from Dream2Fly right away, while
 // employees are still deciding who's picking it up (the popup+buzzer
 // alert is the employee-facing half of this same moment). Real delivery
-// only happens once WHATSAPP_API_URL/TOKEN are configured — until then
+// only happens once TWILIO_ACCOUNT_SID/AUTH_TOKEN/WHATSAPP_FROM are configured — until then
 // this safely logs instead, exactly like every other not-yet-configured
 // integration in this app.
 async function sendInitialWhatsAppGreeting(lead) {

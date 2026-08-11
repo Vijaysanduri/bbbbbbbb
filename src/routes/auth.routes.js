@@ -5,6 +5,8 @@ const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole, requirePermission, requireHrCapability } = require('../middleware/auth');
 const { logActivity } = require('../utils/activityLog');
 const { rateLimiter } = require('../middleware/rateLimiter');
+const { generatePartnerCertificatePdf } = require('../utils/partnerCertificatePdf');
+const { generatePartnerBusinessCardPdf } = require('../utils/partnerBusinessCardPdf');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -141,23 +143,60 @@ router.patch('/employees/:id/salary', requireAuth, requireRole('ADMIN', 'SUPER_A
 // PATCH /api/auth/employees/:id/permissions — Admin/Super Admin only.
 // Per-person feature grants, independent of role — the "on/off" toggle
 // that lets Admin give any individual access to specific Admin-dashboard
-// features (currently: Resignations management, Employee 360) without
-// changing their role or granting broader access.
+// features (currently: Resignations management, Employee 360,
+// Promotions) without changing their role or granting broader access.
 router.patch('/employees/:id/permissions', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { canAccessResignationsAdmin, canAccessEmployee360 } = req.body;
+  const { canAccessResignationsAdmin, canAccessEmployee360, canAccessPromotions } = req.body;
   const updated = await prisma.user.update({
     where: { id: req.params.id },
     data: {
       ...(canAccessResignationsAdmin !== undefined ? { canAccessResignationsAdmin: !!canAccessResignationsAdmin } : {}),
       ...(canAccessEmployee360 !== undefined ? { canAccessEmployee360: !!canAccessEmployee360 } : {}),
+      ...(canAccessPromotions !== undefined ? { canAccessPromotions: !!canAccessPromotions } : {}),
     },
-    select: { id: true, fullName: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
+    select: { id: true, fullName: true, canAccessResignationsAdmin: true, canAccessEmployee360: true, canAccessPromotions: true },
   });
   const changes = [];
   if (canAccessResignationsAdmin !== undefined) changes.push('Resignations Admin: ' + (canAccessResignationsAdmin ? 'ON' : 'OFF'));
   if (canAccessEmployee360 !== undefined) changes.push('Employee 360: ' + (canAccessEmployee360 ? 'ON' : 'OFF'));
+  if (canAccessPromotions !== undefined) changes.push('Promotions: ' + (canAccessPromotions ? 'ON' : 'OFF'));
   if (changes.length) await logActivity(`Permissions changed for ${updated.fullName} — ${changes.join(', ')}.`, req.user.id);
   res.json(updated);
+});
+
+// GET /api/auth/employees/:id/certificate — Admin/Super Admin only.
+// Generates the official "Channel Partner Certificate" PDF for the given
+// partner, live on each request rather than stored — this is meant to
+// always reflect current partnership status, unlike a payment receipt
+// which must stay frozen at the moment it was issued.
+router.get('/employees/:id/certificate', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const partner = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!partner) return res.status(404).json({ error: 'Partner not found.' });
+  if (partner.role !== 'CHANNEL_PARTNER') return res.status(400).json({ error: 'Certificates are only for Channel Partner accounts.' });
+  const pdfBuffer = await generatePartnerCertificatePdf({
+    partnerName: partner.fullName,
+    partnerId: partner.id.slice(-8).toUpperCase(),
+    issueDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }),
+  });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="Dream2Fly-Partner-Certificate-${partner.fullName.replace(/\s+/g, '-')}.pdf"`);
+  res.send(pdfBuffer);
+});
+
+// GET /api/auth/employees/:id/business-card — Admin/Super Admin only.
+// Same auto-fill-from-real-data pattern as the certificate above.
+router.get('/employees/:id/business-card', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const partner = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!partner) return res.status(404).json({ error: 'Partner not found.' });
+  if (partner.role !== 'CHANNEL_PARTNER') return res.status(400).json({ error: 'Business cards are only for Channel Partner accounts.' });
+  const pdfBuffer = await generatePartnerBusinessCardPdf({
+    partnerName: partner.fullName,
+    partnerEmail: partner.email,
+    partnerPhone: partner.phone,
+  });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="Dream2Fly-Partner-BusinessCard-${partner.fullName.replace(/\s+/g, '-')}.pdf"`);
+  res.send(pdfBuffer);
 });
 
 // GET /api/auth/me/dashboard-access — any authenticated user. Checked
@@ -169,9 +208,9 @@ router.get('/me/dashboard-access', requireAuth, async (req, res) => {
   if (['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return res.json({ allowed: true });
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
-    select: { canAccessResignationsAdmin: true, canAccessEmployee360: true },
+    select: { canAccessResignationsAdmin: true, canAccessEmployee360: true, canAccessPromotions: true },
   });
-  const allowed = !!(user && (user.canAccessResignationsAdmin || user.canAccessEmployee360));
+  const allowed = !!(user && (user.canAccessResignationsAdmin || user.canAccessEmployee360 || user.canAccessPromotions));
   res.json({ allowed, permissions: user });
 });
 
@@ -215,8 +254,8 @@ router.get('/employees', requireAuth, async (req, res) => {
       allowed = !settings || settings.hrSeesResignations !== false || settings.hrSeesEmployee360 !== false;
     }
     if (!allowed) {
-      const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { canAccessResignationsAdmin: true, canAccessEmployee360: true } });
-      allowed = !!(user && (user.canAccessResignationsAdmin || user.canAccessEmployee360));
+      const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { canAccessResignationsAdmin: true, canAccessEmployee360: true, canAccessPromotions: true } });
+      allowed = !!(user && (user.canAccessResignationsAdmin || user.canAccessEmployee360 || user.canAccessPromotions));
     }
     if (!allowed) {
       return res.status(403).json({ error: 'You do not have permission to do this.' });
@@ -230,7 +269,7 @@ router.get('/employees', requireAuth, async (req, res) => {
   const includeInactive = req.query.includeInactive === '1';
   const employees = await prisma.user.findMany({
     where: includeInactive ? {} : { active: true },
-    select: { id: true, fullName: true, email: true, phone: true, role: true, active: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true },
+    select: { id: true, fullName: true, email: true, phone: true, role: true, active: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true, canAccessPromotions: true },
     orderBy: { fullName: 'asc' },
   });
   res.json(employees);

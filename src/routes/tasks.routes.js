@@ -68,11 +68,11 @@ async function notifyCaseWatchersByEmail(task, title, actorId) {
 // GET /api/tasks/whatsapp-status — any signed-in staff member. Lets the
 // frontend show "WhatsApp isn't connected yet" wherever a "Via WhatsApp"
 // option is offered, instead of silently logging a message nobody ever
-// receives. Flips to true automatically the moment real WHATSAPP_API_URL
-// / WHATSAPP_API_TOKEN credentials are added — no frontend change needed
-// when that integration is actually set up.
+// receives. Flips to true automatically the moment real Twilio
+// credentials are added — no frontend change needed when that
+// integration is actually set up.
 router.get('/whatsapp-status', requireAuth, (req, res) => {
-  res.json({ configured: !!(process.env.WHATSAPP_API_URL && process.env.WHATSAPP_API_TOKEN) });
+  res.json({ configured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_WHATSAPP_FROM) });
 });
 
 // POST /api/tasks/email-preview — any signed-in staff member. Renders
@@ -116,6 +116,7 @@ router.get('/', requireAuth, async (req, res) => {
       comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
+      applications: { orderBy: { createdAt: 'asc' } },
     },
     orderBy: { due: 'asc' }
   });
@@ -149,6 +150,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
+      applications: { orderBy: { createdAt: 'asc' } },
     }
   });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
@@ -368,6 +370,61 @@ router.patch('/:id/interview-notes', requireAuth, async (req, res) => {
 // in full, same "always-current, not a log" pattern as overview/
 // interview-notes — the comment thread already captures history if
 // someone wants to know what changed and when.
+// ---------------- Applications (multiple universities per candidate) ----------------
+
+// POST /api/tasks/:id/applications — add a new application row for this
+// task. Open to any staff role (not Admin-restricted, unlike loan/visa/
+// reference above) since tracking which universities a candidate applied
+// to is core case-handling work, not something sensitive.
+router.post('/:id/applications', requireAuth, async (req, res) => {
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const { label, institution, program, country, intake, applicationId, status, notes } = req.body;
+  const existingCount = await prisma.application.count({ where: { taskId: task.id } });
+  const application = await prisma.application.create({
+    data: {
+      taskId: task.id,
+      label: label || `Application ${existingCount + 1}`,
+      institution, program, country, intake, applicationId, status, notes,
+    },
+  });
+  await logActivity(`${task.related} — added "${application.label}" (${institution || 'institution TBD'}).`, req.user.id);
+  res.status(201).json(application);
+});
+
+// PATCH /api/tasks/applications/:id — update one application's details.
+// Note this is NOT nested under /tasks/:taskId/ — the application's own
+// id is sufficient to find and update it directly.
+router.patch('/applications/:id', requireAuth, async (req, res) => {
+  const application = await prisma.application.findUnique({ where: { id: req.params.id }, include: { task: true } });
+  if (!application) return res.status(404).json({ error: 'Application not found.' });
+  const { label, institution, program, country, intake, applicationId, status, notes } = req.body;
+  const updated = await prisma.application.update({
+    where: { id: req.params.id },
+    data: {
+      ...(label !== undefined ? { label } : {}),
+      ...(institution !== undefined ? { institution } : {}),
+      ...(program !== undefined ? { program } : {}),
+      ...(country !== undefined ? { country } : {}),
+      ...(intake !== undefined ? { intake } : {}),
+      ...(applicationId !== undefined ? { applicationId } : {}),
+      ...(status !== undefined ? { status } : {}),
+      ...(notes !== undefined ? { notes } : {}),
+    },
+  });
+  await logActivity(`${application.task.related} — "${updated.label}" updated${status !== undefined ? ' — status: ' + status : ''}.`, req.user.id);
+  res.json(updated);
+});
+
+// DELETE /api/tasks/applications/:id
+router.delete('/applications/:id', requireAuth, async (req, res) => {
+  const application = await prisma.application.findUnique({ where: { id: req.params.id }, include: { task: true } });
+  if (!application) return res.status(404).json({ error: 'Application not found.' });
+  await prisma.application.delete({ where: { id: req.params.id } });
+  await logActivity(`${application.task.related} — removed "${application.label}".`, req.user.id);
+  res.json({ success: true });
+});
+
 // PATCH /api/tasks/:id/reference — Admin/Super Admin only. For when the
 // referring channel partner isn't comfortable using their own portal
 // login — a reference contact recorded here instead. Only Admin/Super

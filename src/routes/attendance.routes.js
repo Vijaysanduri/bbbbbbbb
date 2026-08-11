@@ -14,11 +14,17 @@ function startOfDay(d) {
 
 // GET /api/attendance/all?date=YYYY-MM-DD — Admin/Super Admin only.
 router.get('/all', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  // Supports both the original single-date query (still the default,
+  // for backward compatibility) and a proper date range via from/to,
+  // plus an optional employeeId filter — this used to only ever show
+  // one day at a time with no way to filter to a specific person or
+  // see a real range.
   const dateStr = req.query.date || new Date().toISOString().slice(0, 10);
-  const dayStart = new Date(dateStr + 'T00:00:00.000Z');
-  const dayEnd = new Date(dateStr + 'T23:59:59.999Z');
+  const from = req.query.from ? new Date(req.query.from + 'T00:00:00.000Z') : new Date(dateStr + 'T00:00:00.000Z');
+  const to = req.query.to ? new Date(req.query.to + 'T23:59:59.999Z') : new Date(dateStr + 'T23:59:59.999Z');
+  const employeeId = req.query.employeeId || undefined;
   const records = await prisma.attendance.findMany({
-    where: { date: { gte: dayStart, lte: dayEnd } },
+    where: { date: { gte: from, lte: to }, ...(employeeId ? { userId: employeeId } : {}) },
     include: { user: { select: { fullName: true, role: true } } },
     orderBy: { date: 'desc' },
   });
