@@ -228,6 +228,8 @@ model User {
   // next login.
   canAccessResignationsAdmin Boolean @default(false)
   canAccessEmployee360       Boolean @default(false)
+  canAccessPromotions        Boolean @default(false)
+  canAccessPromotions        Boolean @default(false)
 
   // Reporting structure — foundation for approval routing (leave,
   // attendance, payroll sign-off) and for showing "who's my manager/HR"
@@ -271,6 +273,7 @@ model User {
   requestedPayments              Payment[] @relation("StaffPaymentRequests")
   paymentRemarksEdited           Payment[] @relation("PaymentRemarksEditor")
   reviewedCareerApplications     CareerApplication[] @relation("CareerApplicationReviewer")
+  uploadedMediaAssets            MediaAsset[]
   notifications                  Notification[]
   resignations              Resignation[] @relation("ResigningEmployee")
   reviewedResignations      Resignation[] @relation("ResignationReviewer")
@@ -436,6 +439,14 @@ model Task {
   // application at a glance without opening the portal.
   applicationId String?
   intake        String?
+
+  // Multiple university applications for the same candidate — the
+  // fields above (course/college/applicationId/intake) stay exactly as
+  // they were, untouched, so nothing existing breaks. This relation is
+  // additive: when a candidate has applied to two or more universities
+  // at once, each gets tracked here as its own row instead of only ever
+  // being able to represent one application per case.
+  applications Application[]
 
   // Separate from Overview — a dedicated place to log interview-specific
   // details (questions asked, interviewer feedback, outcome) once a case
@@ -1128,4 +1139,45 @@ model CareerApplication {
   reviewedBy   User?     @relation("CareerApplicationReviewer", fields: [reviewedById], references: [id])
   reviewedAt   DateTime?
   createdAt    DateTime  @default(now())
+}
+
+// Images/videos attached to a WhatsApp send (Promotions, or eventually
+// candidate messaging). Unlike email attachments — which travel as
+// base64 directly inside the message — WhatsApp Business API (Twilio and
+// others) requires a real, publicly-fetchable URL for media; their
+// servers download it themselves rather than accepting embedded bytes.
+// This stores the upload once and serves it back out via
+// GET /api/media/:id, giving WhatsApp something it can actually fetch.
+model MediaAsset {
+  id           String   @id @default(cuid())
+  fileName     String
+  mimeType     String
+  fileData     String   @db.Text // base64 — same storage approach already used for InfoDocument/Comment attachments elsewhere in this app
+  uploadedById String?
+  uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+}
+
+// One university application. A Task can have several of these when a
+// candidate has applied to multiple universities at once — each tracked
+// independently with its own status, so "Application 1 got a
+// conditional offer, Application 2 is still pending" is representable
+// instead of only ever having one set of course/college/status fields
+// per case. Fields mirror the structured update format from the
+// reference screenshot (KC Overseas-style: student name, application
+// ID, country, institution, program, intake, status).
+model Application {
+  id            String   @id @default(cuid())
+  taskId        String
+  task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label         String   @default("Application 1") // e.g. "Application 1", "Application 2" — just a display label, freely editable
+  institution   String?
+  program       String?
+  country       String?
+  intake        String?
+  applicationId String? // the university/agent's own reference number for this specific application
+  status        String? // e.g. "Conditional Offer Received", "Unconditional Offer", "Rejected", "CAS Issued"
+  notes         String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
