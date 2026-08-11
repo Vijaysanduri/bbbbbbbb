@@ -59,7 +59,15 @@ function generatePaymentReceiptPdf({ receiptNumber, studentName, studentEmail, p
 
     doc.fillColor('#999').fontSize(8).font('Helvetica').text(
       'This is a system-generated receipt confirming a successful payment made via Razorpay. For any query regarding this transaction, please contact your Dream2Fly counsellor with the receipt number above.',
-      50, 720, { width: 495 }
+      50, 700, { width: 495 }
+    );
+    doc.fillColor('#999').fontSize(8).font('Helvetica-Bold').text(
+      'This payment is non-refundable once processed, in accordance with Dream2Fly\u2019s company policy.',
+      50, 730, { width: 495 }
+    );
+    doc.fillColor('#bbb').fontSize(7).font('Helvetica').text(
+      `\u00A9 ${new Date().getFullYear()} Dream2Fly Consulting Services Ltd. All rights reserved.`,
+      50, 750, { width: 495 }
     );
 
     doc.end();

@@ -1,39 +1,63 @@
-// Dream2Fly — WhatsApp sending utility.
+// Dream2Fly — WhatsApp sending utility, built for Twilio's real
+// Messages API (confirmed against Twilio's own docs): HTTP Basic Auth
+// (Account SID as username, Auth Token as password), form-urlencoded
+// body — not the generic Bearer+JSON placeholder this file used to be.
 //
-// IMPORTANT: this is a stub. Actually sending real WhatsApp messages
-// requires a WhatsApp Business API account (commonly set up through
-// Twilio, or Meta's own Cloud API) — that's a real third-party service
-// with its own signup, phone number verification, and cost, which hasn't
-// been set up here. Until WHATSAPP_* env vars are configured, this just
-// logs the message to the console, exactly like the email utility does
-// when SMTP isn't configured — so the rest of the app can be built and
-// tested against this interface now, and swapped for a real integration
-// later without changing any calling code.
-
-async function sendWhatsApp({ to, message }) {
-  if (!process.env.WHATSAPP_API_URL || !process.env.WHATSAPP_API_TOKEN) {
-    console.log('--- WHATSAPP (not configured, logging instead) ---');
+// Needs three environment variables in Railway:
+//   TWILIO_ACCOUNT_SID   — starts with "AC..."
+//   TWILIO_AUTH_TOKEN    — from the same Console page, keep this secret
+//   TWILIO_WHATSAPP_FROM — the sending number, in the form "whatsapp:+14155238886"
+//                          (Twilio's sandbox number, until a real business
+//                          sender is approved — then swap in that number)
+//
+// Until all three are set, this just logs the message to the console,
+// exactly like the email utility does when SMTP isn't configured — so
+// the rest of the app can be built and tested against this interface,
+// and it starts sending for real the moment these are added, with no
+// code changes needed anywhere that calls it.
+async function sendWhatsApp({ to, message, mediaUrl }) {
+  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM } = process.env;
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_WHATSAPP_FROM) {
+    console.log('--- WHATSAPP (Twilio not configured, logging instead) ---');
     console.log('To:', to);
     console.log(message);
-    console.log('----------------------------------------------------');
+    if (mediaUrl) console.log('Media:', mediaUrl);
+    console.log('-----------------------------------------------------------');
     return { delivered: false, logged: true };
   }
 
-  // Example shape for a Twilio-style WhatsApp API call — replace with
-  // your actual provider's request format once you have real credentials.
-  const res = await fetch(process.env.WHATSAPP_API_URL, {
+  // Twilio expects both numbers prefixed with "whatsapp:" and in E.164
+  // format (+countrycode...). Accepts a bare local-format number here
+  // and adds the country code only if one isn't already present, since
+  // most numbers stored in this app so far are plain 10-digit Indian
+  // numbers without a leading +91.
+  const toWhatsApp = to.startsWith('whatsapp:') ? to : `whatsapp:${to.startsWith('+') ? to : '+91' + to.replace(/\D/g, '')}`;
+
+  const params = new URLSearchParams({
+    From: TWILIO_WHATSAPP_FROM,
+    To: toWhatsApp,
+    Body: message,
+  });
+  if (mediaUrl) params.append('MediaUrl', mediaUrl);
+
+  const basicAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${basicAuth}`,
     },
-    body: JSON.stringify({ to, message }),
+    body: params.toString(),
   });
+
   if (!res.ok) {
-    console.error('WhatsApp send failed:', await res.text());
+    const errBody = await res.text();
+    console.error('WhatsApp send failed:', res.status, errBody);
     return { delivered: false, error: true };
   }
-  return { delivered: true };
+  const data = await res.json();
+  return { delivered: true, sid: data.sid };
 }
 
 module.exports = { sendWhatsApp };
