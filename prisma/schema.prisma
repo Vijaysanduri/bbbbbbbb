@@ -420,6 +420,21 @@ model Task {
   fees    String?
   overview String? @db.Text
 
+  // Which kind of visa case this is — the two options a task can
+  // realistically be, kept as a plain string (not a Postgres enum) for
+  // the same reason case stages are: shouldn't need a deploy if a third
+  // category is ever needed. Carried over from the Lead's `service`
+  // field on conversion where it matches, but editable independently
+  // after that.
+  caseType String? // "Work Visa" | "Student Visa"
+
+  // Admin/Super Admin-only confidential notes — genuinely sensitive
+  // internal commentary that shouldn't reach Employee at all, not even
+  // read-only. Enforced the same way referencePhone is: stripped
+  // server-side for anyone who isn't Admin/Super Admin, not just hidden
+  // in Employee's UI.
+  confidentialNotes String? @db.Text
+
   // Reference contact — for when the channel partner who referred this
   // candidate isn't comfortable using their own portal login (e.g. not
   // literate in reading/navigating a web app), Admin/Super Admin can
