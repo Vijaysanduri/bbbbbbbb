@@ -431,17 +431,20 @@ router.patch('/employees/:id/role', requireAuth, requireRole('ADMIN', 'SUPER_ADM
 });
 
 // GET /api/auth/me/team — any signed-in user. Shows who to go to: their
-// reporting manager, and the active HR contact(s) — this is what powers
-// the "My Team" card on the Employee dashboard.
+// reporting manager, plus the active HR contact(s) — but HR contacts
+// only for internal staff. A Channel Partner is an external business
+// relationship, not someone with an HR relationship to this company —
+// showing them HR's personal phone/email wasn't a deliberate design
+// choice, just something that had never been scoped down.
 router.get('/me/team', requireAuth, async (req, res) => {
   const me = await prisma.user.findUnique({
     where: { id: req.user.id },
     include: { reportingManager: { select: { fullName: true, email: true, phone: true, jobTitle: true } } },
   });
-  const hrContacts = await prisma.user.findMany({
-    where: { role: 'HR', active: true },
-    select: { fullName: true, email: true, phone: true },
-  });
+  const STAFF_ROLES = ['ADMIN', 'SUPER_ADMIN', 'MANAGER', 'HR', 'FINANCE', 'COUNSELLOR', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'EMPLOYEE'];
+  const hrContacts = STAFF_ROLES.includes(req.user.role)
+    ? await prisma.user.findMany({ where: { role: 'HR', active: true }, select: { fullName: true, email: true, phone: true } })
+    : [];
   res.json({ reportingManager: me.reportingManager, hrContacts });
 });
 

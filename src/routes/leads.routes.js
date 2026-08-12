@@ -456,6 +456,11 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
       stage: 'DOC_CHECKLIST_SENT',
       contactPhone: lead.contactPhone,
       contactEmail: lead.contactEmail,
+      // Only carries over when it's an exact match — a lead's service
+      // can also be "Visiting Visa" or "Tourist Visa", which don't fit
+      // either of Task's two supported case types. Left unset rather
+      // than guessed at in that case; staff can set it manually.
+      caseType: ['Work Visa', 'Student Visa'].includes(lead.service) ? lead.service : null,
       referredByPartnerId: lead.referredByPartnerId,
       assignedEmployeeId: req.user.id,
       convertedFromLeadId: lead.id,

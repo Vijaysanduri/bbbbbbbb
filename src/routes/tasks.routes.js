@@ -95,10 +95,18 @@ router.post('/email-preview', requireAuth, (req, res) => {
 // this is the one deliberate exception. Doing this server-side (not
 // just hiding it in the frontend) means the phone number genuinely
 // never reaches an Employee's browser, not just stays unrendered there.
-function maskReferencePhone(task, requesterRole) {
+// Strips referencePhone and confidentialNotes unless the requester is
+// Admin/Super Admin — applied after the query rather than in `select`,
+// since everything else about a task is already fully visible to any
+// staff role, and these are the deliberate exceptions. Doing this
+// server-side (not just hiding it in the frontend) means Employee's
+// browser genuinely never receives either field, not just leaves them
+// unrendered there.
+function maskAdminOnlyFields(task, requesterRole) {
   if (!task) return task;
   if (!['ADMIN', 'SUPER_ADMIN'].includes(requesterRole)) {
     task.referencePhone = null;
+    task.confidentialNotes = null;
   }
   return task;
 }
@@ -120,7 +128,7 @@ router.get('/', requireAuth, async (req, res) => {
     },
     orderBy: { due: 'asc' }
   });
-  res.json(tasks.map(t => maskReferencePhone(t, req.user.role)));
+  res.json(tasks.map(t => maskAdminOnlyFields(t, req.user.role)));
 });
 
 // GET /api/tasks/me — Student only. Their own linked case(s), with the
@@ -138,8 +146,30 @@ router.get('/me', requireAuth, requireRole('STUDENT'), async (req, res) => {
   });
   // A student has no business seeing the partner reference contact at
   // all — this isn't information about their own case that concerns
-  // them, it's an internal note about who referred them.
-  res.json(tasks.map(t => { t.referenceName = null; t.referencePhone = null; return t; }));
+  // them, it's an internal note about who referred them. Loan/visa
+  // status and dates are genuinely theirs to know (many anxious
+  // applicants want exactly this), but the bank official's personal
+  // contact and staff-internal notes are working details for the team,
+  // not the student — stripped the same way referencePhone is, at the
+  // API level, not just left off the UI. Same reasoning extends to
+  // interviewNotes (staff's candid assessment of how the interview
+  // went) and overview (the internal "at a glance" summary meant for a
+  // colleague, not the applicant) — neither is ever shown anywhere in
+  // the student frontend, confirmed by checking, so there's no reason
+  // for either to leave the server at all.
+  res.json(tasks.map(t => {
+    t.referenceName = null;
+    t.referencePhone = null;
+    t.loanOfficialName = null;
+    t.loanOfficialContact = null;
+    t.loanNotes = null;
+    t.visaNotes = null;
+    t.interviewNotes = null;
+    t.overview = null;
+    t.confidentialNotes = null;
+    t.referredByPartnerId = null;
+    return t;
+  }));
 });
 
 // GET /api/tasks/:id
@@ -154,7 +184,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
   });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
-  res.json(maskReferencePhone(task, req.user.role));
+  res.json(maskAdminOnlyFields(task, req.user.role));
 });
 
 // GET /api/tasks/:id/overview — "Candidate Overview": one consolidated
@@ -189,7 +219,7 @@ router.get('/:id/overview', requireAuth, async (req, res) => {
       id: task.id, taskNumber: task.taskNumber, related: task.related, country: task.country, due: task.due,
       stage: task.stage, status: task.status, assignedEmployeeName: task.assignedEmployee ? task.assignedEmployee.fullName : null,
       course: task.course, college: task.college, fees: task.fees, applicationId: task.applicationId, intake: task.intake,
-      studentLinked: !!task.studentId, studentEmail: task.student ? task.student.email : null,
+      caseType: task.caseType, studentLinked: !!task.studentId, studentEmail: task.student ? task.student.email : null,
     },
     loan: {
       bankName: task.loanBankName, status: task.loanStatus, officialName: task.loanOfficialName,
@@ -428,7 +458,7 @@ router.delete('/applications/:id', requireAuth, async (req, res) => {
 // PATCH /api/tasks/:id/reference — Admin/Super Admin only. For when the
 // referring channel partner isn't comfortable using their own portal
 // login — a reference contact recorded here instead. Only Admin/Super
-// Admin can set or view the phone number (see maskReferencePhone
+// Admin can set or view the phone number (see maskAdminOnlyFields
 // above); the name is visible to whichever employee handles the case.
 router.patch('/:id/reference', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const { referenceName, referencePhone } = req.body;
@@ -439,6 +469,34 @@ router.patch('/:id/reference', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'),
     data: { referenceName, referencePhone },
   });
   await logActivity(`${task.related} — reference contact updated.`, req.user.id);
+  res.json(updated);
+});
+
+// PATCH /api/tasks/:id/case-type — any staff role, same access as the
+// rest of a task's basic case details (course, college, etc.).
+router.patch('/:id/case-type', requireAuth, async (req, res) => {
+  const { caseType } = req.body;
+  if (caseType && !['Work Visa', 'Student Visa'].includes(caseType)) {
+    return res.status(400).json({ error: 'caseType must be either "Work Visa" or "Student Visa".' });
+  }
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({ where: { id: task.id }, data: { caseType: caseType || null } });
+  await logActivity(`${task.related} — case type set to ${caseType || 'unspecified'}.`, req.user.id);
+  res.json(updated);
+});
+
+// PATCH /api/tasks/:id/confidential-notes — Admin/Super Admin only. This
+// is the one field on a task genuinely meant to stay out of Employee's
+// hands entirely, not just internal-vs-candidate-facing like the
+// regular comment channels — for anything Admin needs to record that an
+// employee handling the case specifically shouldn't see.
+router.patch('/:id/confidential-notes', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { confidentialNotes } = req.body;
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({ where: { id: task.id }, data: { confidentialNotes: confidentialNotes || null } });
+  await logActivity(`${task.related} — confidential notes updated.`, req.user.id);
   res.json(updated);
 });
 
@@ -483,17 +541,30 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
+  // A student can only comment on their own linked case — without this,
+  // any student could post to any task just by knowing (or guessing) its
+  // ID, since this endpoint otherwise has no role restriction.
+  const isStudentAuthor = req.user.role === 'STUDENT';
+  if (isStudentAuthor && task.studentId !== req.user.id) {
+    return res.status(403).json({ error: 'This isn\'t your case.' });
+  }
+  // A student's own message is always candidate-facing by definition —
+  // there's no "internal note" concept from their side.
+  const resolvedChannel = isStudentAuthor ? 'CANDIDATE_FACING' : (channel === 'CANDIDATE_FACING' ? 'CANDIDATE_FACING' : 'INTERNAL');
+
   const comment = await prisma.comment.create({
-    data: { taskId: task.id, authorId: req.user.id, text, attachmentUrl: attachmentUrl || null, attachmentName: attachmentName || null, channel: channel === 'CANDIDATE_FACING' ? 'CANDIDATE_FACING' : 'INTERNAL' },
+    data: { taskId: task.id, authorId: req.user.id, text, attachmentUrl: attachmentUrl || null, attachmentName: attachmentName || null, channel: resolvedChannel },
     include: { author: { select: { id: true, fullName: true } } }
   });
 
   // Posting to the Candidate tab emails by default — but sendEmail:false
   // lets an employee save a candidate-facing note without actually
   // sending it right now (e.g. drafting, or logging something they told
-  // the candidate over a call instead of by email).
+  // the candidate over a call instead of by email). None of this applies
+  // when the student is the one writing — emailing them a copy of their
+  // own message back to their own inbox would be pointless.
   let mailResult = null;
-  if (channel === 'CANDIDATE_FACING' && sendEmail !== false) {
+  if (!isStudentAuthor && resolvedChannel === 'CANDIDATE_FACING' && sendEmail !== false) {
     if (!task.contactEmail) {
       return res.status(400).json({ error: 'Comment saved, but no email on file for this candidate — add one in Contact details to actually send it.', comment });
     }
@@ -510,7 +581,7 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
   notifyRecordWatchers({
     assignedEmployeeId: task.assignedEmployeeId,
     actorId: req.user.id,
-    title: `New comment on ${task.related}`,
+    title: isStudentAuthor ? `${task.related} replied` : `New comment on ${task.related}`,
     body: `${req.user.fullName}: ${text.length > 100 ? text.slice(0, 100) + '…' : text}`,
     type: 'TASK_COMMENT',
     link: 'tasks',
