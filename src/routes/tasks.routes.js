@@ -89,12 +89,6 @@ router.post('/email-preview', requireAuth, (req, res) => {
 });
 
 // GET /api/tasks?name=&country=&from=&to=
-// Strips referencePhone unless the requester is Admin/Super Admin —
-// applied after the query rather than in `select`, since everything
-// else about a task is already fully visible to any staff role, and
-// this is the one deliberate exception. Doing this server-side (not
-// just hiding it in the frontend) means the phone number genuinely
-// never reaches an Employee's browser, not just stays unrendered there.
 // Strips referencePhone and confidentialNotes unless the requester is
 // Admin/Super Admin — applied after the query rather than in `select`,
 // since everything else about a task is already fully visible to any
@@ -472,6 +466,23 @@ router.patch('/:id/reference', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'),
   res.json(updated);
 });
 
+// PATCH /api/tasks/:id/confidential-notes — Admin/Super Admin only, both
+// to set and to read (enforced here on write; enforced on read via
+// maskAdminOnlyFields above). For anything Admin wants on record that
+// genuinely shouldn't be visible to whichever employee handles the case
+// day to day.
+router.patch('/:id/confidential-notes', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { confidentialNotes } = req.body;
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: { confidentialNotes },
+  });
+  await logActivity(`${task.related} — confidential notes updated.`, req.user.id);
+  res.json(updated);
+});
+
 // PATCH /api/tasks/:id/case-type — any staff role, same access as the
 // rest of a task's basic case details (course, college, etc.).
 router.patch('/:id/case-type', requireAuth, async (req, res) => {
@@ -591,7 +602,7 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
   // an email to watchers; every internal back-and-forth getting its own
   // email would burn through the daily send limit fast for no real benefit
   // over the bell notification above.
-  if (channel === 'CANDIDATE_FACING') {
+  if (resolvedChannel === 'CANDIDATE_FACING') {
     notifyCaseWatchersByEmail(task, 'Comment Received', req.user.id)
       .catch(err => console.error('[tasks/:id/comments] notifyCaseWatchersByEmail failed:', err.message));
   }
