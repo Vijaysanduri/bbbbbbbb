@@ -230,7 +230,6 @@ model User {
   canAccessResignationsAdmin Boolean @default(false)
   canAccessEmployee360       Boolean @default(false)
   canAccessPromotions        Boolean @default(false)
-  canAccessPromotions        Boolean @default(false)
 
   // Reporting structure — foundation for approval routing (leave,
   // attendance, payroll sign-off) and for showing "who's my manager/HR"
@@ -448,13 +447,6 @@ model Task {
   // response.
   referenceName  String?
   referencePhone String?
-
-  // Admin-only note — visible to Admin/Super Admin only, never Employee,
-  // enforced server-side (stripped from the response for non-admin
-  // roles), same as referencePhone above. For anything Admin wants on
-  // record about a case that genuinely shouldn't be visible to whichever
-  // employee is handling it day to day.
-  confidentialNotes String? @db.Text
 
   // Application reference number and intake term, e.g. "98887/25-26" and
   // "Sep, 2026" — shown on the case-update notification email so whoever
