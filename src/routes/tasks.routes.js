@@ -2,7 +2,7 @@ const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { sendMail, renderTemplate, renderTaskStageTemplate, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignB } = require('../utils/mailer');
+const { sendMail, renderTemplate, renderTaskStageTemplate, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignB, wrapApplicationUpdateEmailHtml } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
 const { createNotification, notifyRecordWatchers } = require('../utils/notifications');
 
@@ -526,13 +526,13 @@ router.patch('/:id/loan', requireAuth, async (req, res) => {
 // PATCH /api/tasks/:id/visa — the Visa tab in the Task modal, same
 // pattern as /loan above.
 router.patch('/:id/visa', requireAuth, async (req, res) => {
-  const { visaType, visaReferenceNumber, visaFiledDate, visaApprovedDate, visaNotes } = req.body;
+  const { visaType, visaReferenceNumber, visaFiledDate, visaApprovedDate, visaAgentName, visaAgentPhone, visaNotes } = req.body;
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({
     where: { id: task.id },
     data: {
-      visaType, visaReferenceNumber, visaNotes,
+      visaType, visaReferenceNumber, visaNotes, visaAgentName, visaAgentPhone,
       visaFiledDate: visaFiledDate ? new Date(visaFiledDate) : null,
       visaApprovedDate: visaApprovedDate ? new Date(visaApprovedDate) : null,
     },
@@ -541,13 +541,54 @@ router.patch('/:id/visa', requireAuth, async (req, res) => {
   res.json(updated);
 });
 
+// Visa documents — a small file library attached to a task's visa
+// process (filing receipt, biometric letter, CAS letter, etc.),
+// separate from the pre-visa student document checklist.
+router.get('/:id/visa-documents', requireAuth, async (req, res) => {
+  const docs = await prisma.visaDocument.findMany({
+    where: { taskId: req.params.id },
+    select: { id: true, fileName: true, mimeType: true, uploadedAt: true, uploadedBy: { select: { fullName: true } } },
+    orderBy: { uploadedAt: 'desc' },
+  });
+  res.json(docs);
+});
+
+router.post('/:id/visa-documents', requireAuth, async (req, res) => {
+  const { fileName, mimeType, fileData } = req.body;
+  if (!fileName || !fileData) return res.status(400).json({ error: 'fileName and fileData are required.' });
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const doc = await prisma.visaDocument.create({
+    data: { taskId: task.id, fileName, mimeType: mimeType || 'application/pdf', fileData, uploadedById: req.user.id },
+  });
+  await logActivity(`${task.related} — visa document "${fileName}" uploaded.`, req.user.id);
+  res.status(201).json({ id: doc.id, fileName: doc.fileName, mimeType: doc.mimeType, uploadedAt: doc.uploadedAt });
+});
+
+// GET /api/tasks/visa-documents/:docId/raw — the actual file bytes, for
+// downloading. Separate route (not nested under a task id) since once
+// you have the document id, that's all you need.
+router.get('/visa-documents/:docId/raw', requireAuth, async (req, res) => {
+  const doc = await prisma.visaDocument.findUnique({ where: { id: req.params.docId } });
+  if (!doc) return res.status(404).send('Not found.');
+  const buffer = Buffer.from(doc.fileData, 'base64');
+  res.setHeader('Content-Type', doc.mimeType);
+  res.setHeader('Content-Disposition', `inline; filename="${doc.fileName}"`);
+  res.send(buffer);
+});
+
+router.delete('/visa-documents/:docId', requireAuth, async (req, res) => {
+  await prisma.visaDocument.delete({ where: { id: req.params.docId } });
+  res.json({ success: true });
+});
+
 // POST /api/tasks/:id/comments
 // Body: { text, attachmentUrl?, attachmentName?, channel? }
 // channel: 'INTERNAL' (default, staff-only) or 'CANDIDATE_FACING' — the
 // latter attempts a real email to the candidate right away, same as a
 // chat message, not just an internal note.
 router.post('/:id/comments', requireAuth, async (req, res) => {
-  const { text, attachmentUrl, attachmentName, channel, sendEmail } = req.body;
+  const { text, attachmentUrl, attachmentName, channel, sendEmail, applicationUpdateFields, applicationUpdateStatus, applicationUpdateCommentTitle, applicationUpdateCommentBody } = req.body;
   if (!text) return res.status(400).json({ error: 'text is required.' });
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
@@ -585,6 +626,13 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
       body: text,
       attachmentFileName: attachmentName || undefined,
       attachmentBase64: attachmentUrl || undefined,
+      // When the Application Update Format was used, applicationUpdateFields
+      // carries the structured rows — render those as a real styled table
+      // instead of letting the generic template escape the whole thing as
+      // plain-text paragraphs, which is all it can do with an ordinary message.
+      customHtml: applicationUpdateFields
+        ? wrapApplicationUpdateEmailHtml(`Application Update — ${task.related}`, applicationUpdateFields, applicationUpdateCommentTitle, applicationUpdateCommentBody)
+        : undefined,
     });
   }
 

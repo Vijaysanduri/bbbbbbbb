@@ -27,21 +27,31 @@ router.get('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (r
 // Body: { title, category, description, fileName, mimeType, fileData, targetRole }
 // targetRole: "EMPLOYEE" (default — staff roles), "CHANNEL_PARTNER", "STUDENT", or "ALL"
 router.post('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
-  const { title, category, description, fileName, mimeType, fileData, targetRole } = req.body;
+  const { title, category, description, fileName, mimeType, fileData, targetRole, targetUserId } = req.body;
   if (!title || !category || !fileName || !fileData) {
     return res.status(400).json({ error: 'title, category, fileName and fileData are required.' });
   }
   const resolvedTargetRole = ['EMPLOYEE', 'CHANNEL_PARTNER', 'STUDENT', 'ALL'].includes(targetRole) ? targetRole : 'EMPLOYEE';
   const doc = await prisma.signableDocument.create({
-    data: { title, category, description: description || null, fileName, mimeType: mimeType || 'application/pdf', fileData, createdById: req.user.id, targetRole: resolvedTargetRole },
+    data: { title, category, description: description || null, fileName, mimeType: mimeType || 'application/pdf', fileData, createdById: req.user.id, targetRole: resolvedTargetRole, targetUserId: targetUserId || null },
   });
 
-  // Who needs to acknowledge this depends on targetRole — staff, partners, students, or everyone.
-  const roleFilter = resolvedTargetRole === 'CHANNEL_PARTNER' ? ['CHANNEL_PARTNER']
-    : resolvedTargetRole === 'STUDENT' ? ['STUDENT']
-    : resolvedTargetRole === 'ALL' ? ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'CHANNEL_PARTNER', 'STUDENT']
-    : ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'];
-  const recipients = await prisma.user.findMany({ where: { active: true, role: { in: roleFilter } } });
+  // Individually-assigned documents skip the broad role-based recipient
+  // list entirely — this one goes to exactly the person picked, e.g.
+  // a specific new hire's Employment Agreement, not every current
+  // employee. targetRole is still saved for reference/filtering, but
+  // ignored for recipient selection when targetUserId is set.
+  let recipients;
+  if (targetUserId) {
+    const person = await prisma.user.findUnique({ where: { id: targetUserId } });
+    recipients = person ? [person] : [];
+  } else {
+    const roleFilter = resolvedTargetRole === 'CHANNEL_PARTNER' ? ['CHANNEL_PARTNER']
+      : resolvedTargetRole === 'STUDENT' ? ['STUDENT']
+      : resolvedTargetRole === 'ALL' ? ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'CHANNEL_PARTNER', 'STUDENT']
+      : ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'];
+    recipients = await prisma.user.findMany({ where: { active: true, role: { in: roleFilter } } });
+  }
   for (const person of recipients) {
     await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: person.id } });
     await sendMail({
