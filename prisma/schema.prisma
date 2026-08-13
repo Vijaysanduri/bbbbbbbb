@@ -256,6 +256,10 @@ model User {
   assignedAssetAssignments AssetAssignment[] @relation("AssetAssigner")
   createdSignableDocuments SignableDocument[]
   signableDocumentAcks     SignableDocumentAck[]
+  targetedSignableDocuments SignableDocument[] @relation("SignableDocumentTargetUser")
+  uploadedVisaDocuments     VisaDocument[]
+  siteThemeUpdates          SiteTheme[]
+  createdDocumentTemplates  DocumentTemplate[]
   personalNotes            PersonalNote[]
   partnerReferredLeads     Lead[]         @relation("PartnerReferral")
   partnerReferredTasks     Task[]         @relation("PartnerReferredTasks")
@@ -488,7 +492,10 @@ model Task {
   visaReferenceNumber String?
   visaFiledDate        DateTime?
   visaApprovedDate     DateTime?
+  visaAgentName        String?
+  visaAgentPhone       String?
   visaNotes            String? @db.Text
+  visaDocuments        VisaDocument[]
 
   stage String?
 
@@ -1024,7 +1031,14 @@ model SignableDocument {
   // Who this document applies to — reuses the same sign/upload/view
   // infrastructure for both Employee agreements and Channel Partner
   // agreements instead of building a second parallel system.
-  targetRole    String   @default("EMPLOYEE") // "EMPLOYEE" | "CHANNEL_PARTNER" | "ALL"
+  targetRole    String   @default("EMPLOYEE") // "EMPLOYEE" | "CHANNEL_PARTNER" | "STUDENT" | "ALL" — ignored when targetUserId is set
+  // When set, this document is for exactly one person — not a broad
+  // role category. Set at upload time when Admin/HR picks "A Specific
+  // Person" instead of a target-audience group, e.g. handing a new
+  // hire their individual Employment Agreement rather than broadcasting
+  // a template to every current employee.
+  targetUserId  String?
+  targetUser    User?    @relation("SignableDocumentTargetUser", fields: [targetUserId], references: [id])
   description   String?
   fileName      String
   mimeType      String
@@ -1195,4 +1209,57 @@ model Application {
   notes         String?  @db.Text
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+}
+
+// Documents attached to a task's visa process (visa filing receipt,
+// biometric appointment letter, CAS letter, etc.) — separate from the
+// student document checklist, which is for pre-visa application
+// requirements. Multiple files per task, since a visa process usually
+// involves several documents over time, not just one.
+model VisaDocument {
+  id           String   @id @default(cuid())
+  taskId       String
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fileName     String
+  mimeType     String
+  fileData     String   @db.Text
+  uploadedById String?
+  uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
+  uploadedAt   DateTime @default(now())
+}
+
+// A single row holding the site-wide color theme — applies everywhere:
+// public website, login, and all four dashboards. Deliberately just one
+// row (id always "singleton") rather than a history of themes, since
+// there's only ever one "current" site color scheme at a time. Public
+// GET (even the logged-out public website needs these colors before
+// anyone signs in); PATCH is Admin/Super Admin only.
+model SiteTheme {
+  id           String   @id @default("singleton")
+  primaryColor String   @default("#0b1f4d") // navy — headers, sidebar, primary buttons
+  accentColor  String   @default("#f6c221") // gold — highlights, active states, CTAs
+  dangerColor  String   @default("#b3282d") // red — delete/error/badge-red
+  updatedById  String?
+  updatedBy    User?    @relation(fields: [updatedById], references: [id])
+  updatedAt    DateTime @updatedAt
+}
+
+// A reusable document template — either typed directly in the app (a
+// mail-merge style letter with {{placeholders}}) or an uploaded .docx
+// file that already has {{placeholders}} written into it. Either way,
+// "prepare for [person]" fills those placeholders with that person's
+// actual data and produces a real, ready-to-send document — saved once,
+// reused for every new hire/student/partner instead of retyping or
+// re-uploading each time.
+model DocumentTemplate {
+  id            String   @id @default(cuid())
+  title         String
+  category      String   // "AGREEMENT" | "ONBOARDING" — matches SignableDocument's own categories
+  bodyType      String   // "TEXT" (typed in-app) | "DOCX" (uploaded Word file)
+  textBody      String?  @db.Text // for bodyType "TEXT" — plain text/simple HTML with {{placeholders}}
+  docxFileData  String?  @db.Text // for bodyType "DOCX" — the original uploaded file, base64
+  docxFileName  String?
+  createdById   String?
+  createdBy     User?    @relation(fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
 }
