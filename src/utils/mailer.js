@@ -79,6 +79,56 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// A dedicated, more visual template specifically for the "Application
+// Update Format" — the structured Student's Name / Application Id /
+// Country / Institution / Program / Intake / Status layout used to
+// mirror how partner agencies like KC Overseas send these. Deep and
+// light blue combination, laid out as a real card with field rows
+// rather than escaped plain-text paragraphs, since that structured
+// data reads much better as a proper table than as sentences.
+function wrapApplicationUpdateEmailHtml(subject, fields, commentTitle, commentBody){
+  const rows = fields.map(([label, value]) =>
+    `<tr>
+      <td style="padding:10px 14px; background:#eef4ff; font-size:12px; font-weight:700; color:#0B1F4D; letter-spacing:0.3px; text-transform:uppercase; border-bottom:1px solid #ffffff; width:40%;">${escapeHtml(label)}</td>
+      <td style="padding:10px 14px; background:#f7faff; font-size:14px; color:#1a2b4d; border-bottom:1px solid #ffffff;">${escapeHtml(value || '—')}</td>
+    </tr>`
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
+    <tr><td align="center">
+      <table width="100%" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);" cellpadding="0" cellspacing="0">
+        <tr><td style="background:#F6C221; padding:34px 24px 28px; text-align:center;">
+          <img src="${SITE_BASE_URL}/images/email/logo-mark.png" width="52" height="45" alt="Dream2Fly" style="display:block; margin:0 auto 10px;">
+          <div style="font-size:26px; font-weight:800; color:#0B1F4D; letter-spacing:0.5px;">DREAM<span style="color:#A11D24;">2</span>FLY</div>
+          <div style="font-size:11px; font-weight:700; color:#0B1F4D; letter-spacing:2px; margin-top:2px;">CONSULTING SERVICES LIMITED</div>
+        </td></tr>
+        <tr><td style="background:linear-gradient(135deg, #0B1F4D, #163a7d); padding:22px 28px; text-align:center;">
+          <div style="font-size:17px; font-weight:700; color:#ffffff;">${escapeHtml(subject)}</div>
+        </td></tr>
+        <tr><td style="background:#ffffff; padding:24px 24px 8px;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px; overflow:hidden; border:1px solid #dbe6fb;">
+            ${rows}
+          </table>
+        </td></tr>
+        <tr><td style="background:#ffffff; padding:20px 28px 28px;">
+          <div style="background:#eef4ff; border-left:4px solid #163a7d; border-radius:6px; padding:16px 18px;">
+            <div style="font-size:13px; font-weight:700; color:#0B1F4D; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">${escapeHtml(commentTitle || 'Comment Received')}</div>
+            ${commentBody ? `<div style="font-size:14px; line-height:1.6; color:#333333;">${escapeHtml(commentBody).replace(/\n/g, '<br>')}</div>` : ''}
+          </div>
+        </td></tr>
+        <tr><td>
+          <img src="${SITE_BASE_URL}/images/email/footer-banner.png" alt="Dream2Fly Consulting Services Limited — Hyderabad, Vijayawada, London" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 // Sends via Resend's HTTP API (https://resend.com) rather than raw SMTP.
 // Cloud hosts like Railway commonly block outbound SMTP ports (25/465/587)
 // to prevent spam abuse — that showed up here as ETIMEDOUT on every SMTP
@@ -92,7 +142,7 @@ function isConfigured() {
   return !!process.env.RESEND_API_KEY;
 }
 
-async function sendMail({ to, subject, body, attachmentFileName, attachmentBase64, attachmentMimeType }) {
+async function sendMail({ to, subject, body, attachmentFileName, attachmentBase64, attachmentMimeType, customHtml }) {
   if (!isConfigured()) {
     console.log('--- EMAIL (RESEND_API_KEY not set, logging instead) ---');
     console.log('To:', to);
@@ -107,7 +157,7 @@ async function sendMail({ to, subject, body, attachmentFileName, attachmentBase6
     to: [to],
     subject,
     text: body,
-    html: wrapEmailHtmlDesignB(subject, body),
+    html: customHtml || wrapEmailHtmlDesignB(subject, body),
   };
   if (attachmentFileName && attachmentBase64) {
     payload.attachments = [{
@@ -228,4 +278,4 @@ ${portalLink || 'https://dream2fly.co.uk/login.html'}`;
   return { subject, body };
 }
 
-module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB };
+module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB, wrapApplicationUpdateEmailHtml };
