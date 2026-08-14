@@ -622,7 +622,7 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
     }
     mailResult = await sendMail({
       to: task.contactEmail,
-      subject: `Message from Dream2Fly regarding ${task.related}`,
+      subject: applicationUpdateFields ? `Application Update — ${task.related}` : `Message from Dream2Fly regarding ${task.related}`,
       body: text,
       attachmentFileName: attachmentName || undefined,
       attachmentBase64: attachmentUrl || undefined,
