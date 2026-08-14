@@ -89,8 +89,8 @@ function escapeHtml(str) {
 function wrapApplicationUpdateEmailHtml(subject, fields, commentTitle, commentBody){
   const rows = fields.map(([label, value]) =>
     `<tr>
-      <td style="padding:10px 14px; background:#eef4ff; font-size:12px; font-weight:700; color:#0B1F4D; letter-spacing:0.3px; text-transform:uppercase; border-bottom:1px solid #ffffff; width:40%;">${escapeHtml(label)}</td>
-      <td style="padding:10px 14px; background:#f7faff; font-size:14px; color:#1a2b4d; border-bottom:1px solid #ffffff;">${escapeHtml(value || '—')}</td>
+      <td style="padding:12px 16px; background:#0B1F4D; font-size:11.5px; font-weight:700; color:#ffffff; letter-spacing:0.4px; text-transform:uppercase; border-bottom:2px solid #ffffff; width:38%; vertical-align:middle;">${escapeHtml(label)}</td>
+      <td style="padding:12px 16px; background:#eef4ff; font-size:14.5px; font-weight:600; color:#0B1F4D; border-bottom:2px solid #ffffff; vertical-align:middle;">${escapeHtml(value || '—')}</td>
     </tr>`
   ).join('');
 
@@ -105,18 +105,18 @@ function wrapApplicationUpdateEmailHtml(subject, fields, commentTitle, commentBo
           <div style="font-size:26px; font-weight:800; color:#0B1F4D; letter-spacing:0.5px;">DREAM<span style="color:#A11D24;">2</span>FLY</div>
           <div style="font-size:11px; font-weight:700; color:#0B1F4D; letter-spacing:2px; margin-top:2px;">CONSULTING SERVICES LIMITED</div>
         </td></tr>
-        <tr><td style="background:linear-gradient(135deg, #0B1F4D, #163a7d); padding:22px 28px; text-align:center;">
+        <tr><td style="background:linear-gradient(135deg, #0B1F4D, #1e4fa8); padding:22px 28px; text-align:center;">
           <div style="font-size:17px; font-weight:700; color:#ffffff;">${escapeHtml(subject)}</div>
         </td></tr>
         <tr><td style="background:#ffffff; padding:24px 24px 8px;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px; overflow:hidden; border:1px solid #dbe6fb;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px; overflow:hidden; border:2px solid #0B1F4D;">
             ${rows}
           </table>
         </td></tr>
         <tr><td style="background:#ffffff; padding:20px 28px 28px;">
-          <div style="background:#eef4ff; border-left:4px solid #163a7d; border-radius:6px; padding:16px 18px;">
-            <div style="font-size:13px; font-weight:700; color:#0B1F4D; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">${escapeHtml(commentTitle || 'Comment Received')}</div>
-            ${commentBody ? `<div style="font-size:14px; line-height:1.6; color:#333333;">${escapeHtml(commentBody).replace(/\n/g, '<br>')}</div>` : ''}
+          <div style="background:#eef4ff; border-left:5px solid #0B1F4D; border-radius:6px; padding:16px 18px;">
+            <div style="font-size:13px; font-weight:800; color:#0B1F4D; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">${escapeHtml(commentTitle || 'Comment Received')}</div>
+            ${commentBody ? `<div style="font-size:14px; line-height:1.6; color:#26314f;">${escapeHtml(commentBody).replace(/\n/g, '<br>')}</div>` : ''}
           </div>
         </td></tr>
         <tr><td>
