@@ -51,7 +51,14 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(express.json());
+// Default Express JSON limit is 100kb — far too small for base64-encoded
+// file uploads (documents, visa files, images all go through this same
+// global parser). Base64 adds ~33% overhead on top of the raw file size,
+// so 10mb here comfortably covers every "keep files under Xmb" limit
+// already promised in the UI (3mb documents, 5mb visa files) with real
+// headroom, rather than silently rejecting uploads the frontend itself
+// said were fine.
+app.use(express.json({ limit: '10mb' }));
 
 // Basic security headers — the concrete equivalent of what helmet.js
 // would set, without adding a new dependency for a handful of headers.
