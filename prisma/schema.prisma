@@ -261,6 +261,9 @@ model User {
   siteThemeUpdates          SiteTheme[]
   createdDocumentTemplates  DocumentTemplate[]
   leadHistoryActions        LeadHistoryEntry[]
+  targetedPartnerDocRequirements PartnerDocRequirement[] @relation("PartnerDocRequirementTarget")
+  targetedStudentDocRequirements StudentDocRequirement[] @relation("StudentDocRequirementTarget")
+  reviewedSignableDocumentAcks   SignableDocumentAck[] @relation("SignableDocumentAckReviewer")
   personalNotes            PersonalNote[]
   partnerReferredLeads     Lead[]         @relation("PartnerReferral")
   partnerReferredTasks     Task[]         @relation("PartnerReferredTasks")
@@ -845,6 +848,12 @@ model PartnerDocRequirement {
   createdBy   User?    @relation("PartnerDocRequirementCreator", fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
   submissions PartnerDocSubmission[]
+  // When set, this requirement applies only to this one specific
+  // partner — not the whole partner roster. Lets Admin ask a single
+  // partner for something extra (e.g. an updated ID) without every
+  // other partner seeing an irrelevant checklist item appear.
+  targetUserId String?
+  targetUser   User?   @relation("PartnerDocRequirementTarget", fields: [targetUserId], references: [id])
 }
 
 // A checklist item for students applying to a specific destination — or
@@ -860,6 +869,11 @@ model StudentDocRequirement {
   createdBy   User?    @relation("StudentDocRequirementCreator", fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
   submissions StudentDocSubmission[]
+  // Same idea as PartnerDocRequirement.targetUserId above — when set,
+  // this requirement is only for this one student, not the whole cohort
+  // applying to that country.
+  targetUserId String?
+  targetUser   User?   @relation("StudentDocRequirementTarget", fields: [targetUserId], references: [id])
 }
 
 enum ResignationStatus {
@@ -1072,6 +1086,19 @@ model SignableDocumentAck {
   // triggered manually by Admin/HR clicking "Send Reminder", tracked here.
   remindersSentCount Int       @default(0)
   lastReminderAt     DateTime?
+
+  // Review workflow — once someone signs or uploads, Admin/HR can
+  // Approve (confirms it's genuinely acceptable) or Reject (something's
+  // wrong — a bad scan, wrong document, missing signature — and asks
+  // them to redo it). Rejecting clears signedAt/uploadedFileData so the
+  // person's own dashboard immediately shows it as pending again, with
+  // the reason attached so they know what to fix, rather than silently
+  // reverting with no explanation.
+  reviewStatus     String?   // null = not yet reviewed | "APPROVED" | "REJECTED"
+  reviewedAt       DateTime?
+  reviewedById     String?
+  reviewedBy       User?     @relation("SignableDocumentAckReviewer", fields: [reviewedById], references: [id])
+  rejectionReason  String?   @db.Text
 
   @@unique([documentId, userId])
 }
