@@ -260,6 +260,7 @@ model User {
   uploadedVisaDocuments     VisaDocument[]
   siteThemeUpdates          SiteTheme[]
   createdDocumentTemplates  DocumentTemplate[]
+  leadHistoryActions        LeadHistoryEntry[]
   personalNotes            PersonalNote[]
   partnerReferredLeads     Lead[]         @relation("PartnerReferral")
   partnerReferredTasks     Task[]         @relation("PartnerReferredTasks")
@@ -359,11 +360,17 @@ model Lead {
 }
 
 model LeadHistoryEntry {
-  id     String     @id @default(cuid())
-  leadId String
-  lead   Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  stage  LeadStatus
-  date   DateTime   @default(now())
+  id      String     @id @default(cuid())
+  leadId  String
+  lead    Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  stage   LeadStatus
+  date    DateTime   @default(now())
+  // Who made this specific stage change — previously untracked, meaning
+  // the stage timeline showed WHAT changed and WHEN but never WHO did
+  // it. Optional since existing rows predate this field and system-driven
+  // changes (auto-conversion, etc.) may genuinely have no human actor.
+  actorId String?
+  actor   User?      @relation(fields: [actorId], references: [id])
 }
 
 model FollowUp {
