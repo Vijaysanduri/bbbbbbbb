@@ -15,6 +15,87 @@ const prisma = new PrismaClient();
 
 // GET /api/signable-documents — Admin/HR/Super Admin only. Every document,
 // with a completion count so it's clear at a glance who's still pending.
+// GET /api/signable-documents/submissions — Admin/HR/Super Admin only.
+// A flat, reviewable queue of every actual submission (signed or
+// uploaded) across every document, not grouped by document template —
+// this is what Admin actually needs to work through when there are many
+// people to review, rather than clicking into each document one at a
+// time. Supports filtering by name, role, date range, and review status.
+router.get('/submissions', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const { name, role, from, to, reviewStatus } = req.query;
+  const acks = await prisma.signableDocumentAck.findMany({
+    where: {
+      OR: [{ signedAt: { not: null } }, { uploadedFileData: { not: null } }],
+      ...(reviewStatus === 'PENDING' ? { reviewStatus: null } : reviewStatus ? { reviewStatus } : {}),
+      ...(role ? { user: { is: { role } } } : {}),
+      ...(name ? { user: { is: { fullName: { contains: name } } } } : {}),
+    },
+    include: {
+      user: { select: { id: true, fullName: true, role: true } },
+      document: { select: { id: true, title: true, category: true } },
+      reviewedBy: { select: { fullName: true } },
+    },
+    orderBy: [{ signedAt: 'desc' }, { uploadedAt: 'desc' }],
+  });
+  // Date filtering applied in JS rather than the query above, since
+  // "submitted" means whichever of signedAt/uploadedAt is actually set,
+  // and Prisma can't easily express "whichever of these two is
+  // non-null, filter by that one" in a single where clause.
+  const filtered = acks.filter(a => {
+    const submittedAt = a.signedAt || a.uploadedAt;
+    if (from && submittedAt < new Date(from)) return false;
+    if (to && submittedAt > new Date(new Date(to).getTime() + 24 * 60 * 60 * 1000)) return false;
+    return true;
+  });
+  res.json(filtered.map(a => ({
+    documentId: a.documentId, userId: a.userId, title: a.document.title, category: a.document.category,
+    userName: a.user.fullName, userRole: a.user.role,
+    signedByTypedName: a.signedByTypedName, signedAt: a.signedAt,
+    uploadedFileName: a.uploadedFileName, uploadedAt: a.uploadedAt,
+    hasUpload: !!a.uploadedFileData,
+    reviewStatus: a.reviewStatus, reviewedAt: a.reviewedAt, reviewedByName: a.reviewedBy ? a.reviewedBy.fullName : null,
+    rejectionReason: a.rejectionReason,
+  })));
+});
+
+// POST /api/signable-documents/:id/acks/:userId/approve — Admin/HR only.
+router.post('/:id/acks/:userId/approve', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const ack = await prisma.signableDocumentAck.update({
+    where: { documentId_userId: { documentId: req.params.id, userId: req.params.userId } },
+    data: { reviewStatus: 'APPROVED', reviewedAt: new Date(), reviewedById: req.user.id, rejectionReason: null },
+  });
+  res.json(ack);
+});
+
+// POST /api/signable-documents/:id/acks/:userId/reject — Admin/HR only.
+// Body: { reason }. Clears their signature/upload entirely, so their own
+// dashboard immediately shows this as pending again — not silently, the
+// reason is stored and emailed to them so they know what to fix.
+router.post('/:id/acks/:userId/reject', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const { reason } = req.body;
+  if (!reason) return res.status(400).json({ error: 'Please give a reason so the person knows what to fix.' });
+  const [ack, doc] = await Promise.all([
+    prisma.signableDocumentAck.update({
+      where: { documentId_userId: { documentId: req.params.id, userId: req.params.userId } },
+      data: {
+        reviewStatus: 'REJECTED', reviewedAt: new Date(), reviewedById: req.user.id, rejectionReason: reason,
+        signedByTypedName: null, signedAt: null, uploadedFileData: null, uploadedFileName: null, uploadedAt: null,
+      },
+    }),
+    prisma.signableDocument.findUnique({ where: { id: req.params.id } }),
+  ]);
+  const person = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (person) {
+    await sendMail({
+      to: person.email,
+      subject: `Action needed: "${doc.title}" needs to be resubmitted`,
+      body: `Hi ${person.fullName},\n\nYour submission for "${doc.title}" needs another look before it can be accepted:\n\n"${reason}"\n\nPlease sign or upload it again from your portal.\n\nBest,\nDream2Fly`,
+    });
+  }
+  await logActivity(`${req.user.fullName} rejected ${person ? person.fullName : 'a submission'}'s "${doc.title}" — asked to resubmit.`, req.user.id);
+  res.json(ack);
+});
+
 router.get('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
   const docs = await prisma.signableDocument.findMany({
     include: { acknowledgments: true },
