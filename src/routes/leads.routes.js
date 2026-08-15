@@ -158,7 +158,7 @@ router.get('/', requireAuth, async (req, res) => {
   const leads = await prisma.lead.findMany({
     where,
     include: {
-      history: { orderBy: { date: 'asc' } },
+      history: { orderBy: { date: 'asc' }, include: { actor: { select: { fullName: true } } } },
       followUps: { orderBy: { date: 'desc' }, include: { loggedBy: { select: { id: true, fullName: true } } } },
       comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
@@ -263,7 +263,7 @@ router.post('/', requireAuth, async (req, res) => {
       assignedEmployeeId: req.user.id,
       assignedAt: isPartner ? null : new Date(),
       referredByPartnerId: isPartner ? req.user.id : null,
-      history: { create: [{ stage: 'ENQUIRY_RECEIVED' }] }
+      history: { create: [{ stage: 'ENQUIRY_RECEIVED', actorId: req.user.id }] }
     },
     include: { history: true, followUps: true, comments: true }
   });
@@ -288,7 +288,7 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     where: { id: lead.id },
     data: {
       status,
-      history: { create: [{ stage: status }] },
+      history: { create: [{ stage: status, actorId: req.user.id }] },
       ...(status === 'CONVERTED' ? { convertedAt: new Date() } : {})
     }
   });
@@ -424,7 +424,7 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
   const lead = await prisma.lead.findUnique({
     where: { id: req.params.id },
     include: {
-      history: { orderBy: { date: 'asc' } },
+      history: { orderBy: { date: 'asc' }, include: { actor: { select: { fullName: true } } } },
       followUps: { orderBy: { date: 'asc' }, include: { loggedBy: { select: { fullName: true } } } },
       comments: { include: { author: { select: { fullName: true } } } },
       assignedEmployee: { select: { fullName: true } },
@@ -478,7 +478,7 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
 
   await prisma.lead.update({
     where: { id: lead.id },
-    data: { status: 'CONVERTED', convertedAt: new Date(), history: { create: [{ stage: 'CONVERTED' }] } }
+    data: { status: 'CONVERTED', convertedAt: new Date(), history: { create: [{ stage: 'CONVERTED', actorId: req.user.id }] } }
   });
 
   await logActivity(`${lead.name} converted from lead to a task — new sale.`, req.user.id);
