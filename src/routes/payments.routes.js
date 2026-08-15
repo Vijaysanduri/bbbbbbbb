@@ -192,6 +192,15 @@ router.post('/:id/verify', requireAuth, requireRole('STUDENT'), verifyRateLimit,
 // GET /api/payments — Admin/Super Admin/Employee/Counsellor/Manager only.
 // Every payment request across every student.
 router.get('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
+  // Admin/Super Admin see every payment company-wide, same as every
+  // other list in the app. Employee/Counsellor/Manager only see payments
+  // for students whose linked task is actually assigned to them — this
+  // was previously missing entirely, meaning any staff member could see
+  // every candidate's payment history regardless of who it belonged to.
+  const isLeadership = ['ADMIN', 'SUPER_ADMIN'].includes(req.user.role);
+  const where = isLeadership ? {} : {
+    student: { is: { ownTasks: { some: { assignedEmployeeId: req.user.id } } } },
+  };
   // Deliberately NOT selecting receiptPdf here — that's a multi-KB base64
   // blob per row, and this list can grow to hundreds/thousands of
   // payments over time. Loading every receipt's PDF just to show a table
@@ -199,6 +208,7 @@ router.get('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'CO
   // know a receipt exists; the actual PDF is fetched separately, only
   // for the one payment someone actually clicks to view/download.
   const payments = await prisma.payment.findMany({
+    where,
     select: {
       id: true, purpose: true, amount: true, status: true, createdAt: true, paidAt: true,
       receiptNumber: true, remarks: true, remarksUpdatedAt: true,
@@ -218,9 +228,15 @@ router.get('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'CO
 router.get('/:id/receipt', requireAuth, async (req, res) => {
   const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
   if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  const isLeadership = ['ADMIN', 'SUPER_ADMIN'].includes(req.user.role);
   const staffRoles = ['ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'];
   const isOwner = req.user.id === payment.studentId;
-  if (!isOwner && !staffRoles.includes(req.user.role)) {
+  let isAssignedStaff = false;
+  if (!isLeadership && staffRoles.includes(req.user.role)) {
+    const assignedTask = await prisma.task.findFirst({ where: { studentId: payment.studentId, assignedEmployeeId: req.user.id } });
+    isAssignedStaff = !!assignedTask;
+  }
+  if (!isOwner && !isLeadership && !isAssignedStaff) {
     return res.status(403).json({ error: 'You do not have permission to view this receipt.' });
   }
   if (!payment.receiptPdf) return res.status(404).json({ error: 'No receipt available for this payment — it may not have completed successfully yet.' });
