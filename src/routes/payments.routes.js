@@ -72,7 +72,7 @@ router.get('/me', requireAuth, requireRole('STUDENT'), async (req, res) => {
     where: { studentId: req.user.id },
     select: {
       id: true, purpose: true, amount: true, status: true, createdAt: true, paidAt: true,
-      receiptNumber: true, razorpayOrderId: true, razorpayPaymentId: true,
+      receiptNumber: true, razorpayOrderId: true, razorpayPaymentId: true, paymentInstructions: true,
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -86,6 +86,8 @@ router.post('/:id/create-order', requireAuth, requireRole('STUDENT'), async (req
   if (!payment) return res.status(404).json({ error: 'Payment not found.' });
   if (payment.studentId !== req.user.id) return res.status(403).json({ error: 'Not authorized.' });
   if (payment.status === 'PAID') return res.status(400).json({ error: 'This has already been paid.' });
+  if (payment.status === 'NOT_REQUIRED') return res.status(400).json({ error: 'This payment is no longer required.' });
+  if (payment.status === 'CANCELLED') return res.status(400).json({ error: 'This payment request was cancelled.' });
 
   const order = await createRazorpayOrder({
     amountInPaise: Math.round(payment.amount * 100),
