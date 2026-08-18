@@ -11,29 +11,39 @@ const prisma = new PrismaClient();
 
 // GET /api/student-docs/requirements?country=UK — anyone signed in.
 // Optional country filter; requirements with country=null apply to everyone.
+// Staff (managing the checklist library) see every requirement,
+// including ones individually targeted at a specific student. Students
+// themselves only ever see broad requirements plus whichever ones were
+// specifically targeted at them — never another student's individual
+// requirement.
 router.get('/requirements', requireAuth, async (req, res) => {
   const { country } = req.query;
+  const isStaff = ['ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'].includes(req.user.role);
+  const broadWhere = country ? { OR: [{ country }, { country: null }] } : {};
   const requirements = await prisma.studentDocRequirement.findMany({
-    where: country ? { OR: [{ country }, { country: null }] } : {},
+    where: isStaff ? broadWhere : { AND: [broadWhere, { OR: [{ targetUserId: null }, { targetUserId: req.user.id }] }] },
+    include: { targetUser: { select: { fullName: true } } },
     orderBy: { createdAt: 'asc' },
   });
   res.json(requirements);
 });
 
 // POST /api/student-docs/requirements — Admin/Super Admin/Employee/Counsellor/Manager only.
-// Body: { title, description, country } — country omitted/null = applies to every destination.
+// Body: { title, description, country, targetUserId } — country omitted/null
+// = applies to every destination; targetUserId set = applies ONLY to that
+// one student, overriding the broad country matching entirely.
 router.post('/requirements', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
-  const { title, description, country } = req.body;
+  const { title, description, country, targetUserId } = req.body;
   if (!title) return res.status(400).json({ error: 'title is required.' });
   const requirement = await prisma.studentDocRequirement.create({
-    data: { title, description: description || null, country: country || null, createdById: req.user.id },
+    data: { title, description: description || null, country: targetUserId ? null : (country || null), createdById: req.user.id, targetUserId: targetUserId || null },
   });
 
-  // Notify students this applies to — everyone if no country set, otherwise
-  // just students whose profile country matches.
-  const students = await prisma.user.findMany({
-    where: { role: 'STUDENT', active: true, ...(country ? { country } : {}) },
-  });
+  // Notify students this applies to — just the one targeted student if
+  // set, otherwise everyone matching (or everyone, if no country set).
+  const students = targetUserId
+    ? await prisma.user.findMany({ where: { id: targetUserId, active: true } })
+    : await prisma.user.findMany({ where: { role: 'STUDENT', active: true, ...(country ? { country } : {}) } });
   for (const student of students) {
     await sendMail({
       to: student.email,

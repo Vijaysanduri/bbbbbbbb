@@ -44,7 +44,15 @@ router.post('/login', loginRateLimit, async (req, res) => {
 router.get('/me', requireAuth, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.id } });
   if (!user) return res.status(404).json({ error: 'User not found.' });
-  res.json({ id: user.id, fullName: user.fullName, email: user.email, role: user.role, jobTitle: user.jobTitle, phone: user.phone, profilePhotoData: user.profilePhotoData, profilePhotoMimeType: user.profilePhotoMimeType });
+  res.json({
+    id: user.id, fullName: user.fullName, email: user.email, role: user.role, jobTitle: user.jobTitle, phone: user.phone,
+    profilePhotoData: user.profilePhotoData, profilePhotoMimeType: user.profilePhotoMimeType,
+    dateOfBirth: user.dateOfBirth, dateOfJoining: user.dateOfJoining,
+    emergencyContactName: user.emergencyContactName, emergencyContactPhone: user.emergencyContactPhone, emergencyContactRelation: user.emergencyContactRelation,
+    currentAddress: user.currentAddress, permanentAddress: user.permanentAddress, bloodGroup: user.bloodGroup,
+    fatherName: user.fatherName, motherName: user.motherName, personalEmail: user.personalEmail,
+    residenceAddress: user.residenceAddress, customOnboardingValues: user.customOnboardingValues,
+  });
 });
 
 // PATCH /api/auth/me/photo — upload your own real profile photo. No
@@ -60,9 +68,9 @@ router.patch('/me/photo', requireAuth, async (req, res) => {
   res.json({ id: updated.id, profilePhotoData: updated.profilePhotoData, profilePhotoMimeType: updated.profilePhotoMimeType });
 });
 
-// PATCH /api/auth/me — update own phone number
+// PATCH /api/auth/me — update own phone number and Onboarding Form details
 router.patch('/me', requireAuth, async (req, res) => {
-  const { phone, email } = req.body;
+  const { phone, email, dateOfBirth, emergencyContactName, emergencyContactPhone, emergencyContactRelation, currentAddress, permanentAddress, bloodGroup, fatherName, motherName, personalEmail, residenceAddress, customOnboardingValues } = req.body;
   if (email !== undefined) {
     if (!email || !email.includes('@')) {
       return res.status(400).json({ error: 'Please enter a valid email address.' });
@@ -74,9 +82,33 @@ router.patch('/me', requireAuth, async (req, res) => {
   }
   const user = await prisma.user.update({
     where: { id: req.user.id },
-    data: { ...(phone !== undefined ? { phone } : {}), ...(email !== undefined ? { email } : {}) },
+    data: {
+      ...(phone !== undefined ? { phone } : {}),
+      ...(email !== undefined ? { email } : {}),
+      // dateOfJoining is deliberately NOT self-editable — that's set by
+      // whoever created the account (Admin/HR), not something an
+      // employee should be able to change about their own record.
+      ...(dateOfBirth !== undefined ? { dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null } : {}),
+      ...(emergencyContactName !== undefined ? { emergencyContactName } : {}),
+      ...(emergencyContactPhone !== undefined ? { emergencyContactPhone } : {}),
+      ...(emergencyContactRelation !== undefined ? { emergencyContactRelation } : {}),
+      ...(currentAddress !== undefined ? { currentAddress } : {}),
+      ...(permanentAddress !== undefined ? { permanentAddress } : {}),
+      ...(bloodGroup !== undefined ? { bloodGroup } : {}),
+      ...(fatherName !== undefined ? { fatherName } : {}),
+      ...(motherName !== undefined ? { motherName } : {}),
+      ...(personalEmail !== undefined ? { personalEmail } : {}),
+      ...(residenceAddress !== undefined ? { residenceAddress } : {}),
+      ...(customOnboardingValues !== undefined ? { customOnboardingValues } : {}),
+    },
   });
-  res.json({ id: user.id, phone: user.phone, email: user.email });
+  res.json({
+    id: user.id, phone: user.phone, email: user.email, dateOfBirth: user.dateOfBirth,
+    emergencyContactName: user.emergencyContactName, emergencyContactPhone: user.emergencyContactPhone, emergencyContactRelation: user.emergencyContactRelation,
+    currentAddress: user.currentAddress, permanentAddress: user.permanentAddress, bloodGroup: user.bloodGroup,
+    fatherName: user.fatherName, motherName: user.motherName, personalEmail: user.personalEmail,
+    residenceAddress: user.residenceAddress, customOnboardingValues: user.customOnboardingValues,
+  });
 });
 
 // POST /api/auth/change-password
@@ -246,6 +278,32 @@ router.get('/students-search', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 
   res.json(students);
 });
 
+// GET /api/auth/onboarding-directory?role=EMPLOYEE|CHANNEL_PARTNER — Admin/Super
+// Admin only. The full picture across everyone's Onboarding Form at
+// once — this is deliberately a separate endpoint from GET /employees
+// above (which many dropdowns/pickers call constantly) rather than
+// bloating every one of those calls with every onboarding field just
+// for this one directory view.
+router.get('/onboarding-directory', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { role } = req.query;
+  const roleFilter = role === 'CHANNEL_PARTNER' ? ['CHANNEL_PARTNER']
+    : role === 'EMPLOYEE' ? ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN']
+    : ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN', 'CHANNEL_PARTNER'];
+  const people = await prisma.user.findMany({
+    where: { role: { in: roleFilter }, active: true },
+    select: {
+      id: true, fullName: true, role: true, jobTitle: true, email: true, phone: true,
+      dateOfBirth: true, dateOfJoining: true, fatherName: true, motherName: true, bloodGroup: true,
+      personalEmail: true, currentAddress: true, residenceAddress: true,
+      emergencyContactName: true, emergencyContactPhone: true, emergencyContactRelation: true,
+      customOnboardingValues: true,
+    },
+    orderBy: { fullName: 'asc' },
+  });
+  const customFields = await prisma.onboardingFieldDefinition.findMany({ where: { active: true }, orderBy: { sortOrder: 'asc' } });
+  res.json({ people, customFields });
+});
+
 router.get('/employees', requireAuth, async (req, res) => {
   if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) {
     let allowed = false;
@@ -314,7 +372,7 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
 // individually logged and permission-checked rather than one big
 // catch-all update.
 router.patch('/employees/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { fullName, email, phone, jobTitle } = req.body;
+  const { fullName, email, phone, jobTitle, dateOfBirth, dateOfJoining, emergencyContactName, emergencyContactPhone, emergencyContactRelation, currentAddress, permanentAddress, bloodGroup } = req.body;
   const target = await prisma.user.findUnique({ where: { id: req.params.id } });
   if (!target) return res.status(404).json({ error: 'User not found.' });
   if (email && email !== target.email) {
@@ -328,10 +386,23 @@ router.patch('/employees/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'),
       ...(email !== undefined ? { email } : {}),
       ...(phone !== undefined ? { phone } : {}),
       ...(jobTitle !== undefined ? { jobTitle } : {}),
+      ...(dateOfBirth !== undefined ? { dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null } : {}),
+      ...(dateOfJoining !== undefined ? { dateOfJoining: dateOfJoining ? new Date(dateOfJoining) : null } : {}),
+      ...(emergencyContactName !== undefined ? { emergencyContactName } : {}),
+      ...(emergencyContactPhone !== undefined ? { emergencyContactPhone } : {}),
+      ...(emergencyContactRelation !== undefined ? { emergencyContactRelation } : {}),
+      ...(currentAddress !== undefined ? { currentAddress } : {}),
+      ...(permanentAddress !== undefined ? { permanentAddress } : {}),
+      ...(bloodGroup !== undefined ? { bloodGroup } : {}),
     },
   });
   await logActivity(`${req.user.fullName} updated ${target.fullName}'s profile details.`, req.user.id);
-  res.json({ id: updated.id, fullName: updated.fullName, email: updated.email, phone: updated.phone, jobTitle: updated.jobTitle });
+  res.json({
+    id: updated.id, fullName: updated.fullName, email: updated.email, phone: updated.phone, jobTitle: updated.jobTitle,
+    dateOfBirth: updated.dateOfBirth, dateOfJoining: updated.dateOfJoining,
+    emergencyContactName: updated.emergencyContactName, emergencyContactPhone: updated.emergencyContactPhone, emergencyContactRelation: updated.emergencyContactRelation,
+    currentAddress: updated.currentAddress, permanentAddress: updated.permanentAddress, bloodGroup: updated.bloodGroup,
+  });
 });
 
 // PATCH /api/auth/employees/:id/deactivate — Admin/Super Admin only. Soft

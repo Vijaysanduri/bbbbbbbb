@@ -116,6 +116,7 @@ router.get('/', requireAuth, async (req, res) => {
     where,
     include: {
       comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
+      history: { orderBy: { date: 'asc' }, include: { actor: { select: { fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
       applications: { orderBy: { createdAt: 'asc' } },
@@ -172,6 +173,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     where: { id: req.params.id },
     include: {
       comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
+      history: { orderBy: { date: 'asc' }, include: { actor: { select: { fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
       applications: { orderBy: { createdAt: 'asc' } },
@@ -276,6 +278,7 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
   await prisma.comment.create({
     data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}" — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.` }
   });
+  await prisma.taskHistoryEntry.create({ data: { taskId: task.id, action: `Status changed to "${status}"`, actorId: req.user.id } });
   await logActivity(`${task.related} — task "${task.title}" status changed to "${status}".`, req.user.id);
   notifyRecordWatchers({
     assignedEmployeeId: task.assignedEmployeeId,
@@ -340,6 +343,7 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
   const stageLabel = stage.replace(/_/g, ' ');
   const noteText = `Stage changed to "${stageLabel}"` + (notifyCandidate ? ` — candidate notified (${notifyCandidateVia || 'email'}).` : ' — candidate was not notified this time.');
   await prisma.comment.create({ data: { taskId: task.id, isSystem: true, authorId: req.user.id, text: noteText } });
+  await prisma.taskHistoryEntry.create({ data: { taskId: task.id, action: `Stage changed to "${stageLabel}"`, actorId: req.user.id } });
   await logActivity(`${task.related} — task "${task.title}" stage changed to "${stageLabel}".`, req.user.id);
   await notifyInternalTeam(updated, `Stage changed to "${stageLabel}".`, req.user.fullName);
   notifyRecordWatchers({
@@ -704,8 +708,9 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
     where: { id: task.id },
     data: { assignedEmployeeId: assignedEmployeeId || null },
   });
+  let employee = null;
   if (assignedEmployeeId) {
-    const employee = await prisma.user.findUnique({ where: { id: assignedEmployeeId } });
+    employee = await prisma.user.findUnique({ where: { id: assignedEmployeeId } });
     if (employee) {
       await sendMail({
         to: employee.email,
@@ -715,6 +720,9 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
       await createNotification(employee.id, 'New task assigned', `"${updated.related}" has been assigned to you.`, 'TASK_ASSIGNED', 'tasks');
     }
   }
+  await prisma.taskHistoryEntry.create({
+    data: { taskId: task.id, action: employee ? `Assigned to ${employee.fullName}` : 'Unassigned — now open for anyone', actorId: req.user.id },
+  });
   await logActivity(`${updated.related} — ${assignedEmployeeId ? 'reassigned' : 'unassigned, now open for anyone'}.`, req.user.id);
   res.json(updated);
 });

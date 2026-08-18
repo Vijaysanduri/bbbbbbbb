@@ -9,22 +9,35 @@ const prisma = new PrismaClient();
 
 // ---------------- Requirements (the checklist itself) ----------------
 
-// GET /api/partner-docs/requirements — anyone signed in can see the checklist.
+// GET /api/partner-docs/requirements — anyone signed in can see the
+// checklist. Staff see everything (including items targeted at a
+// specific partner); partners themselves only see broad requirements
+// plus whichever ones were specifically targeted at them.
 router.get('/requirements', requireAuth, async (req, res) => {
-  const requirements = await prisma.partnerDocRequirement.findMany({ orderBy: { createdAt: 'asc' } });
+  const isStaff = ['ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'].includes(req.user.role);
+  const requirements = await prisma.partnerDocRequirement.findMany({
+    where: isStaff ? {} : { OR: [{ targetUserId: null }, { targetUserId: req.user.id }] },
+    include: { targetUser: { select: { fullName: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
   res.json(requirements);
 });
 
 // POST /api/partner-docs/requirements — Admin/Super Admin only.
+// Body: { title, description, targetUserId } — targetUserId set = this
+// requirement applies only to that one partner, not the whole roster.
 router.post('/requirements', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { title, description } = req.body;
+  const { title, description, targetUserId } = req.body;
   if (!title) return res.status(400).json({ error: 'title is required.' });
   const requirement = await prisma.partnerDocRequirement.create({
-    data: { title, description: description || null, createdById: req.user.id },
+    data: { title, description: description || null, createdById: req.user.id, targetUserId: targetUserId || null },
   });
 
-  // Let every active partner know a new document is needed from them.
-  const partners = await prisma.user.findMany({ where: { role: 'CHANNEL_PARTNER', active: true } });
+  // Let every active partner know a new document is needed from them —
+  // or just the one targeted partner, if this was set for an individual.
+  const partners = targetUserId
+    ? await prisma.user.findMany({ where: { id: targetUserId, active: true } })
+    : await prisma.user.findMany({ where: { role: 'CHANNEL_PARTNER', active: true } });
   for (const partner of partners) {
     await sendMail({
       to: partner.email,
