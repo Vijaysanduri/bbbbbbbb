@@ -3,7 +3,14 @@
 // (hosted on the website, not embedded as base64, so emails stay small
 // and render reliably across mail clients), with the message in between.
 // Plain-text \n\n becomes a new paragraph; single \n becomes a line break.
-const SITE_BASE_URL = 'https://dream2fly.co.uk';
+// Confirmed via direct fetch: the live site resolves at www.dream2fly.co.uk.
+// Using the non-www version here would mean every image tag in every
+// email points through a redirect — most email clients follow that
+// fine, but Gmail's image proxy (it routes external images through its
+// own servers, not the recipient's browser) is known to be less
+// reliable with redirects, which can quietly show a broken image icon
+// instead of the logo even though the same link opens fine in Chrome.
+const SITE_BASE_URL = 'https://www.dream2fly.co.uk';
 
 // ---- Design A: full illustrated letterhead (world map, skyline, service icons) ----
 function wrapEmailHtmlDesignA(subject, bodyText) {
@@ -156,7 +163,7 @@ async function sendMail({ to, subject, body, attachmentFileName, attachmentBase6
     return { delivered: false, logged: true };
   }
   const payload = {
-    from: process.env.EMAIL_FROM || 'Dream2Fly <no-reply@dream2fly.co.uk>',
+    from: process.env.EMAIL_FROM || 'Dream2Fly <noreply-dream2fly@dream2fly.co.uk>',
     to: [to],
     subject,
     text: body,
