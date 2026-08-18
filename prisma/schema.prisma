@@ -210,6 +210,38 @@ model User {
   passwordHash String
   role         Role     @default(EMPLOYEE)
   jobTitle     String?
+  // Needed specifically for automated birthday/work-anniversary
+  // congratulation messages — optional since most existing accounts
+  // predate this, filled in gradually by Admin or the employee
+  // themselves via My Profile. Only month+day matter for matching
+  // "today", not the full date.
+  dateOfBirth    DateTime?
+  dateOfJoining  DateTime?
+
+  // Standard HR onboarding details — collected once when someone joins,
+  // relevant for every employee regardless of role. All optional since
+  // existing accounts predate this and get filled in gradually.
+  emergencyContactName     String?
+  emergencyContactPhone    String?
+  emergencyContactRelation String? // e.g. "Spouse", "Parent", "Sibling"
+  currentAddress           String? @db.Text
+  permanentAddress         String? @db.Text
+  bloodGroup               String? // "A+" | "A-" | "B+" | "B-" | "O+" | "O-" | "AB+" | "AB-"
+  fatherName               String?
+  motherName               String?
+  personalEmail            String? // separate from the account's login email — a personal address for backup contact
+  residenceAddress         String? @db.Text
+  // Holds values for whatever custom fields Admin has added via
+  // OnboardingFieldDefinition below, keyed by that definition's id —
+  // e.g. {"clxyz123": "some answer"}. This is what makes the Onboarding
+  // Form genuinely extensible without needing a schema change (and a
+  // redeploy) every time someone wants one more field collected.
+  customOnboardingValues   Json?
+  // When this person last clicked "I Agree" on their role's Terms &
+  // Conditions. Compared against TermsAndConditions.updatedAt for their
+  // role to know whether they've accepted the current text — if the
+  // terms changed since this timestamp, they're asked to accept again.
+  termsAcceptedAt DateTime?
   // Monthly base salary — set by Admin/HR, used as the input for
   // attendance-based payroll calculation. Kept simple (a single flat
   // monthly figure) rather than a full pay-structure model with
@@ -261,9 +293,14 @@ model User {
   siteThemeUpdates          SiteTheme[]
   createdDocumentTemplates  DocumentTemplate[]
   leadHistoryActions        LeadHistoryEntry[]
+  taskHistoryActions        TaskHistoryEntry[]
   targetedPartnerDocRequirements PartnerDocRequirement[] @relation("PartnerDocRequirementTarget")
   targetedStudentDocRequirements StudentDocRequirement[] @relation("StudentDocRequirementTarget")
   reviewedSignableDocumentAcks   SignableDocumentAck[] @relation("SignableDocumentAckReviewer")
+  termsUpdates                   TermsAndConditions[]
+  createdAutomationRules         AutomationRule[]
+  automationSentLogsReceived     AutomationSentLog[] @relation("AutomationSentLogUser")
+  createdOnboardingFields        OnboardingFieldDefinition[]
   personalNotes            PersonalNote[]
   partnerReferredLeads     Lead[]         @relation("PartnerReferral")
   partnerReferredTasks     Task[]         @relation("PartnerReferredTasks")
@@ -354,6 +391,7 @@ model Lead {
   assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
 
   history    LeadHistoryEntry[]
+  automationSentLogs AutomationSentLog[]
   followUps  FollowUp[]
   comments   Comment[]
   convertedToTask Task? @relation("ConvertedFrom")
@@ -374,6 +412,22 @@ model LeadHistoryEntry {
   // changes (auto-conversion, etc.) may genuinely have no human actor.
   actorId String?
   actor   User?      @relation(fields: [actorId], references: [id])
+}
+
+// The Task equivalent of LeadHistoryEntry above — Tasks never had any
+// per-record timeline at all before this, unlike Leads. Deliberately a
+// free-text "action" description rather than a fixed enum of event
+// types, since a task's timeline needs to cover several genuinely
+// different kinds of events (stage changes, status changes, who it got
+// reassigned to) in one unified feed, not three separate tables.
+model TaskHistoryEntry {
+  id      String   @id @default(cuid())
+  taskId  String
+  task    Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  action  String   // e.g. "Stage changed to Submitted to University", "Assigned to Ananya Rao"
+  actorId String?
+  actor   User?    @relation(fields: [actorId], references: [id])
+  date    DateTime @default(now())
 }
 
 model FollowUp {
@@ -516,6 +570,7 @@ model Task {
   convertedFromLead   Lead?   @relation("ConvertedFrom", fields: [convertedFromLeadId], references: [id])
 
   comments Comment[]
+  history  TaskHistoryEntry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1296,4 +1351,101 @@ model DocumentTemplate {
   createdById   String?
   createdBy     User?    @relation(fields: [createdById], references: [id])
   createdAt     DateTime @default(now())
+}
+
+// A simple, separate Terms & Conditions per role — different from the
+// signable-documents system entirely: no file, no signature, just plain
+// text and an "I Agree" click. One row per role, deliberately kept
+// simple. updatedAt doubles as an implicit version marker — comparing
+// a person's User.termsAcceptedAt against their role's row here is how
+// we know whether they've agreed to the CURRENT text, or an older one
+// that's since changed and needs re-accepting.
+model TermsAndConditions {
+  id        String   @id @default(cuid())
+  role      String   @unique // "STUDENT" | "EMPLOYEE" | "CHANNEL_PARTNER"
+  content   String   @db.Text
+  updatedById String?
+  updatedBy   User?  @relation(fields: [updatedById], references: [id])
+  updatedAt DateTime @updatedAt
+}
+
+// An automated promotion rule — "email every lead that's gone quiet for
+// N days" is the main use case, but built generically enough to cover
+// other trigger types later. A background check (see automation.js)
+// runs periodically, finds everyone currently matching the rule's
+// condition, and sends them the rule's message — skipping anyone
+// already logged in AutomationSentLog for this rule, so nobody gets the
+// same automated email twice.
+model AutomationRule {
+  id            String   @id @default(cuid())
+  name          String   // internal label, e.g. "Re-engage cold leads after 7 days"
+  // Who this rule can possibly apply to — determines which trigger
+  // types are valid and where recipients get pulled from.
+  targetAudience String  @default("LEAD") // "LEAD" | "EMPLOYEE" | "CHANNEL_PARTNER"
+  // LEAD_NO_RESPONSE_DAYS (needs triggerDays) | PARTNER_NO_REFERRAL_DAYS
+  // (needs triggerDays) | EMPLOYEE_BIRTHDAY | EMPLOYEE_WORK_ANNIVERSARY
+  // (these last two ignore triggerDays — they fire once a year, matched
+  // on month+day, not an elapsed count)
+  triggerType   String
+  triggerDays   Int?     // only meaningful for the *_DAYS trigger types above
+  channel       String   @default("EMAIL") // "EMAIL" | "WHATSAPP" | "BOTH"
+  subject       String   // also doubles as the WhatsApp message's opening line when channel includes WhatsApp
+  body          String   @db.Text
+  imageUrl      String?  // also used as the WhatsApp media attachment when channel includes WhatsApp
+  ctaText       String?
+  ctaUrl        String?
+  active        Boolean  @default(true)
+  createdById   String?
+  createdBy     User?    @relation(fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  sentLogs      AutomationSentLog[]
+}
+
+// One row per (rule, recipient, period) — this is what prevents the
+// same person receiving the same automated message twice. For one-time
+// triggers (lead/partner inactivity), period is always "once" — once
+// sent, never sent again for that rule. For yearly triggers (birthdays,
+// anniversaries), period is the year (e.g. "2026") — so the SAME person
+// correctly gets congratulated again next year, without ever getting
+// two birthday messages in the same year no matter how many times the
+// background check runs that week.
+model AutomationSentLog {
+  id        String   @id @default(cuid())
+  ruleId    String
+  rule      AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  // Exactly one of these two is set, depending on the rule's
+  // targetAudience — leadId for LEAD rules, userId for EMPLOYEE/CHANNEL_PARTNER rules.
+  leadId    String?
+  lead      Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation("AutomationSentLogUser", fields: [userId], references: [id], onDelete: Cascade)
+  // A non-nullable stand-in for whichever of leadId/userId is actually
+  // set (e.g. "LEAD:abc123" or "USER:xyz789"). Deliberately NOT relying
+  // on leadId/userId directly in the unique constraint below — SQL
+  // treats NULL as never equal to itself, so a composite unique index
+  // over two nullable columns would silently fail to catch duplicates
+  // whenever one of them is null, which is every single Employee/Partner
+  // row. This field exists specifically to keep that guarantee real.
+  recipientKey String
+  period    String   @default("once")
+  sentAt    DateTime @default(now())
+
+  @@unique([ruleId, recipientKey, period])
+}
+
+// A custom field Admin has added to the Onboarding Form, beyond the
+// fixed set (name, blood group, addresses, etc.) already built into the
+// User model directly. The actual answers live in
+// User.customOnboardingValues, keyed by this row's id — this table only
+// defines what the field IS (label, type, order), not any one person's
+// answer to it.
+model OnboardingFieldDefinition {
+  id          String   @id @default(cuid())
+  label       String   // e.g. "Aadhaar Number", "PAN Card Number"
+  fieldType   String   @default("TEXT") // "TEXT" | "DATE" | "TEXTAREA"
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
 }
