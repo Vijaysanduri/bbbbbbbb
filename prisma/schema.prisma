@@ -134,6 +134,13 @@ enum PaymentStatus {
   PENDING
   PAID
   FAILED
+  NOT_REQUIRED   // Staff marks this when a fee turns out not to apply to
+                 // this particular student — keeps the row for the record
+                 // rather than deleting it, but takes it off anyone's
+                 // "still owed" radar.
+  CANCELLED      // Requested by mistake, or the case fell through before
+                 // payment — distinct from NOT_REQUIRED (which is a
+                 // business decision) vs this (the request itself was wrong).
 }
 
 // A fee a student owes (process fee, application fee, etc.), created by
@@ -174,6 +181,32 @@ model Payment {
   remarksUpdatedById String?
   remarksUpdatedBy   User?         @relation("PaymentRemarksEditor", fields: [remarksUpdatedById], references: [id])
   remarksUpdatedAt   DateTime?
+
+  // For when a student is asked to pay to a different company PhonePe/UPI
+  // number than usual (a different branch account, a temporary number,
+  // etc.) rather than through the normal Razorpay flow — free text so
+  // staff can write exactly what was communicated ("Send to PhonePe
+  // 98XXXXXXXX — Hyderabad office account").
+  paymentInstructions String?  @db.Text
+
+  events PaymentEvent[]
+}
+
+// A single unified timeline per payment — status changes, staff
+// comments, and proof-of-payment screenshot uploads all land here in
+// order, rather than three separate disconnected places. This is what
+// answers "what happened with this payment and who did it."
+model PaymentEvent {
+  id        String   @id @default(cuid())
+  paymentId String
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  type      String   // "STATUS_CHANGE" | "COMMENT" | "PROOF_UPLOAD"
+  text      String?  @db.Text
+  fileData  String?  @db.Text
+  fileName  String?
+  actorId   String?
+  actor     User?    @relation("PaymentEventActor", fields: [actorId], references: [id])
+  createdAt DateTime @default(now())
 }
 
 // A per-user in-app alert — task/lead assignments, documents needing
@@ -297,6 +330,7 @@ model User {
   targetedPartnerDocRequirements PartnerDocRequirement[] @relation("PartnerDocRequirementTarget")
   targetedStudentDocRequirements StudentDocRequirement[] @relation("StudentDocRequirementTarget")
   reviewedSignableDocumentAcks   SignableDocumentAck[] @relation("SignableDocumentAckReviewer")
+  paymentEventActions            PaymentEvent[] @relation("PaymentEventActor")
   termsUpdates                   TermsAndConditions[]
   createdAutomationRules         AutomationRule[]
   automationSentLogsReceived     AutomationSentLog[] @relation("AutomationSentLogUser")
