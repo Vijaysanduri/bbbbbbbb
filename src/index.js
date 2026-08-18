@@ -17,6 +17,9 @@ const mediaRoutes = require('./routes/media.routes');
 const themeRoutes = require('./routes/theme.routes');
 const documentTemplatesRoutes = require('./routes/documentTemplates.routes');
 const searchRoutes = require('./routes/search.routes');
+const termsRoutes = require('./routes/terms.routes');
+const automationRoutes = require('./routes/automation.routes');
+const onboardingFieldsRoutes = require('./routes/onboardingFields.routes');
 const payslipsRoutes = require('./routes/payslips.routes');
 const siteContentRoutes = require('./routes/siteContent.routes');
 const payrollRoutes = require('./routes/payroll.routes');
@@ -86,6 +89,9 @@ app.use('/api/media', mediaRoutes);
 app.use('/api/theme', themeRoutes);
 app.use('/api/document-templates', documentTemplatesRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/terms', termsRoutes);
+app.use('/api/automation', automationRoutes);
+app.use('/api/onboarding-fields', onboardingFieldsRoutes);
 app.use('/api/payslips', payslipsRoutes);
 app.use('/api/site-content', siteContentRoutes);
 app.use('/api/payroll', payrollRoutes);
@@ -144,6 +150,14 @@ app.listen(PORT, () => {
   // to a candidate as-is.
   seedStarterEmailTemplates();
   seedStarterTaskStages();
+
+  // Promotions Automation — checks every 6 hours for leads matching any
+  // active automation rule (e.g. "no response in 7 days") and emails
+  // them automatically. Same in-process interval pattern as the SLA and
+  // reminder schedulers above, for the same reason: this only works
+  // because Railway keeps the process running continuously.
+  const { startAutomationScheduler } = require('./utils/automationScheduler');
+  startAutomationScheduler();
 });
 
 async function seedStarterEmailTemplates() {
