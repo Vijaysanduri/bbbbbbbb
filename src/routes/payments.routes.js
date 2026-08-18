@@ -264,4 +264,102 @@ router.patch('/:id/remarks', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'E
   res.json(updated);
 });
 
+// Everything below this line is new, purely additive functionality —
+// manual status control, an alternate-payment-number workflow for when
+// a student pays to a different company PhonePe/UPI number than usual,
+// and a unified comments/history timeline. None of the existing
+// Razorpay request/pay/verify flow above is touched.
+
+const PAYMENT_STATUS_VALUES = ['PENDING', 'PAID', 'FAILED', 'NOT_REQUIRED', 'CANCELLED'];
+
+// Shared access check used by every new endpoint below — same rule as
+// the rest of payments.routes.js: leadership sees/touches everything,
+// Employee/Counsellor/Manager only their own assigned students' payments.
+async function canAccessPayment(req, payment) {
+  if (['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) return true;
+  if (!['EMPLOYEE', 'COUNSELLOR', 'MANAGER'].includes(req.user.role)) return false;
+  const assignedTask = await prisma.task.findFirst({ where: { studentId: payment.studentId, assignedEmployeeId: req.user.id } });
+  return !!assignedTask;
+}
+
+// PATCH /api/payments/:id/status — manually set a payment's status.
+// Body: { status }. Logs a PaymentEvent so there's a record of who
+// changed it and when, visible in the payment's timeline.
+router.patch('/:id/status', requireAuth, async (req, res) => {
+  const { status } = req.body;
+  if (!PAYMENT_STATUS_VALUES.includes(status)) return res.status(400).json({ error: 'Not a valid status.' });
+  const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  if (!(await canAccessPayment(req, payment))) return res.status(403).json({ error: 'Not authorized.' });
+  const oldStatus = payment.status;
+  const updated = await prisma.payment.update({
+    where: { id: req.params.id },
+    data: { status, ...(status === 'PAID' && !payment.paidAt ? { paidAt: new Date() } : {}) },
+  });
+  await prisma.paymentEvent.create({
+    data: { paymentId: payment.id, type: 'STATUS_CHANGE', text: `Status changed from ${oldStatus} to ${status}`, actorId: req.user.id },
+  });
+  res.json(updated);
+});
+
+// PATCH /api/payments/:id/payment-instructions — sets the note for when
+// a student is asked to pay to a different company number than usual.
+router.patch('/:id/payment-instructions', requireAuth, async (req, res) => {
+  const { paymentInstructions } = req.body;
+  const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  if (!(await canAccessPayment(req, payment))) return res.status(403).json({ error: 'Not authorized.' });
+  const updated = await prisma.payment.update({ where: { id: req.params.id }, data: { paymentInstructions: paymentInstructions || null } });
+  await prisma.paymentEvent.create({
+    data: { paymentId: payment.id, type: 'COMMENT', text: `Payment instructions updated: "${paymentInstructions}"`, actorId: req.user.id },
+  });
+  res.json(updated);
+});
+
+// POST /api/payments/:id/proof — upload a screenshot as proof of an
+// alternate payment. Anyone who can see this payment can upload against
+// it (staff on the student's behalf, or the student themselves) — this
+// does NOT auto-change status; staff still confirms via /status once
+// they've actually checked the screenshot matches a real payment.
+router.post('/:id/proof', requireAuth, async (req, res) => {
+  const { fileData, fileName } = req.body;
+  if (!fileData) return res.status(400).json({ error: 'fileData is required.' });
+  const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  const isOwner = req.user.id === payment.studentId;
+  if (!isOwner && !(await canAccessPayment(req, payment))) return res.status(403).json({ error: 'Not authorized.' });
+  const event = await prisma.paymentEvent.create({
+    data: { paymentId: payment.id, type: 'PROOF_UPLOAD', fileData, fileName: fileName || 'payment-proof', actorId: req.user.id },
+  });
+  res.status(201).json(event);
+});
+
+// POST /api/payments/:id/comment — a free-text note on the timeline.
+router.post('/:id/comment', requireAuth, async (req, res) => {
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: 'text is required.' });
+  const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  const isOwner = req.user.id === payment.studentId;
+  if (!isOwner && !(await canAccessPayment(req, payment))) return res.status(403).json({ error: 'Not authorized.' });
+  const event = await prisma.paymentEvent.create({
+    data: { paymentId: payment.id, type: 'COMMENT', text, actorId: req.user.id },
+  });
+  res.status(201).json(event);
+});
+
+// GET /api/payments/:id/events — the full unified timeline.
+router.get('/:id/events', requireAuth, async (req, res) => {
+  const payment = await prisma.payment.findUnique({ where: { id: req.params.id } });
+  if (!payment) return res.status(404).json({ error: 'Payment not found.' });
+  const isOwner = req.user.id === payment.studentId;
+  if (!isOwner && !(await canAccessPayment(req, payment))) return res.status(403).json({ error: 'Not authorized.' });
+  const events = await prisma.paymentEvent.findMany({
+    where: { paymentId: req.params.id },
+    include: { actor: { select: { fullName: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  res.json(events);
+});
+
 module.exports = router;
