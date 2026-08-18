@@ -15,6 +15,7 @@ function wrapEmailHtmlDesignA(subject, bodyText) {
 
   return `<!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
     <tr><td align="center">
@@ -50,6 +51,7 @@ function wrapEmailHtmlDesignB(subject, bodyText) {
 
   return `<!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
     <tr><td align="center">
@@ -96,6 +98,7 @@ function wrapApplicationUpdateEmailHtml(subject, fields, commentTitle, commentBo
 
   return `<!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
     <tr><td align="center">
@@ -278,4 +281,96 @@ ${portalLink || 'https://dream2fly.co.uk/login.html'}`;
   return { subject, body };
 }
 
-module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB, wrapApplicationUpdateEmailHtml };
+// A polished, on-brand template specifically for Promotions — new
+// intake announcements, scholarship news, partner recruitment, etc.
+// Same visual language as the Application Update template (navy/gold,
+// logo header, footer banner), but built for a marketing message: a
+// large heading, a body paragraph that can include line breaks, an
+// optional image (event banner, offer graphic), and an optional CTA
+// button, rather than a data table.
+// Renders the body text as HTML, with a twist: any line starting with
+// a checkmark or bullet character (✅ ✓ • -) becomes its own colorful
+// card with a tinted background and colored left border, cycling
+// through the brand palette — this is what gives a promotional email
+// real visual energy without relying on CSS animations, which most
+// email clients (Gmail, Outlook) strip out entirely for security
+// reasons and would just silently fail to render at all.
+function renderPromotionBody(bodyText){
+  const palette = [
+    { bg: '#fff8e6', border: '#F6C221', text: '#8a6400' }, // gold
+    { bg: '#eef4ff', border: '#1e4fa8', text: '#0B1F4D' }, // blue
+    { bg: '#eafaf0', border: '#1f9d55', text: '#0f6b34' }, // green
+    { bg: '#fdeeee', border: '#A11D24', text: '#8a1318' }, // red
+  ];
+  const lines = bodyText.split('\n');
+  let html = '';
+  let colorIndex = 0;
+  let paragraphBuffer = [];
+  const flushParagraph = () => {
+    if (paragraphBuffer.length) {
+      html += `<div style="font-size:15px; line-height:1.7; color:#26314f; margin-bottom:14px;">${paragraphBuffer.map(escapeHtml).join('<br>')}</div>`;
+      paragraphBuffer = [];
+    }
+  };
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const bulletMatch = line.match(/^(✅|✓|•|-)\s*(.+)/);
+    if (bulletMatch) {
+      flushParagraph();
+      const color = palette[colorIndex % palette.length];
+      colorIndex++;
+      const text = bulletMatch[2];
+      // Bold the part before an em-dash or colon, if there is one —
+      // e.g. "Zero Processing Fees — our guidance is free" renders
+      // with "Zero Processing Fees" as a bold lead-in.
+      const splitMatch = text.match(/^([^—:]+)([—:])\s*(.*)$/);
+      const inner = splitMatch
+        ? `<b style="color:${color.text};">${escapeHtml(splitMatch[1].trim())}</b>${escapeHtml(splitMatch[2])} ${escapeHtml(splitMatch[3])}`
+        : escapeHtml(text);
+      html += `<div style="background:${color.bg}; border-left:4px solid ${color.border}; border-radius:6px; padding:12px 16px; margin-bottom:10px; font-size:14.5px; line-height:1.6; color:#333333;">✅ ${inner}</div>`;
+    } else if (line) {
+      paragraphBuffer.push(line);
+    } else {
+      flushParagraph();
+    }
+  }
+  flushParagraph();
+  return html;
+}
+
+function wrapPromotionEmailHtml(subject, bodyText, imageUrl, ctaText, ctaUrl){
+  const bodyHtml = renderPromotionBody(bodyText);
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0; padding:0; background:#f4f4f7; font-family:'Segoe UI', Arial, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
+    <tr><td align="center">
+      <table width="100%" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);" cellpadding="0" cellspacing="0">
+        <tr><td style="background:#F6C221; padding:34px 24px 28px; text-align:center;">
+          <img src="${SITE_BASE_URL}/images/email/logo-mark.png" width="52" height="45" alt="Dream2Fly" style="display:block; margin:0 auto 10px;">
+          <div style="font-size:26px; font-weight:800; color:#0B1F4D; letter-spacing:0.5px;">DREAM<span style="color:#A11D24;">2</span>FLY</div>
+          <div style="font-size:11px; font-weight:700; color:#0B1F4D; letter-spacing:2px; margin-top:2px;">CONSULTING SERVICES LIMITED</div>
+        </td></tr>
+        ${imageUrl ? `<tr><td style="padding:0;"><img src="${imageUrl}" alt="" style="display:block; width:100%; max-width:600px; height:auto;"></td></tr>` : ''}
+        <tr><td style="background:linear-gradient(135deg, #0B1F4D, #1e4fa8); padding:22px 28px; text-align:center;">
+          <div style="font-size:19px; font-weight:800; color:#ffffff;">${escapeHtml(subject)}</div>
+        </td></tr>
+        <tr><td style="background:#ffffff; padding:28px;">
+          ${bodyHtml}
+          ${ctaText && ctaUrl ? `<div style="text-align:center; margin-top:22px;"><a href="${ctaUrl}" style="display:inline-block; background:linear-gradient(135deg, #A11D24, #d4342c); color:#ffffff; font-weight:700; padding:14px 34px; border-radius:8px; text-decoration:none; font-size:14.5px; box-shadow:0 4px 12px rgba(161,29,36,0.3);">${escapeHtml(ctaText)}</a></div>` : ''}
+        </td></tr>
+        <tr><td style="background:#f7faff; padding:16px 28px; text-align:center; font-size:12px; color:#8892a6;">
+          Hyderabad · Vijayawada · London &nbsp;|&nbsp; info@dream2fly.co.uk &nbsp;|&nbsp; +91 90005 56593
+        </td></tr>
+        <tr><td>
+          <img src="${SITE_BASE_URL}/images/email/footer-banner.png" alt="Dream2Fly Consulting Services Limited — Hyderabad, Vijayawada, London" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+module.exports = { sendMail, isConfigured, renderTemplate, statusEmailTemplates, taskStageTemplates, renderTaskStageTemplate, quickCandidateTemplates, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignA, wrapEmailHtmlDesignB, wrapApplicationUpdateEmailHtml, wrapPromotionEmailHtml };
