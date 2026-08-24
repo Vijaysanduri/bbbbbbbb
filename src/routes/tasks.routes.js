@@ -738,7 +738,8 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
 // different role (staff/partner), this refuses rather than silently
 // repurposing someone else's login.
 router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
-  const { studentEmail, password } = req.body;
+  const { password } = req.body;
+  const studentEmail = (req.body.studentEmail || '').trim().toLowerCase();
   if (!studentEmail || !studentEmail.includes('@')) return res.status(400).json({ error: 'A valid studentEmail is required.' });
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });

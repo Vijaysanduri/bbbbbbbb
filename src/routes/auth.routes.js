@@ -17,7 +17,8 @@ const passwordChangeRateLimit = rateLimiter({ maxAttempts: 5, windowMs: 15 * 60 
 // POST /api/auth/login
 // Body: { email, password }
 router.post('/login', loginRateLimit, async (req, res) => {
-  const { email, password } = req.body;
+  const { password } = req.body;
+  const email = (req.body.email || '').trim().toLowerCase();
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required.' });
   }
@@ -70,7 +71,8 @@ router.patch('/me/photo', requireAuth, async (req, res) => {
 
 // PATCH /api/auth/me — update own phone number and Onboarding Form details
 router.patch('/me', requireAuth, async (req, res) => {
-  const { phone, email, dateOfBirth, emergencyContactName, emergencyContactPhone, emergencyContactRelation, currentAddress, permanentAddress, bloodGroup, fatherName, motherName, personalEmail, residenceAddress, customOnboardingValues } = req.body;
+  const { phone, dateOfBirth, emergencyContactName, emergencyContactPhone, emergencyContactRelation, currentAddress, permanentAddress, bloodGroup, fatherName, motherName, personalEmail, residenceAddress, customOnboardingValues } = req.body;
+  const email = req.body.email !== undefined ? (req.body.email || '').trim().toLowerCase() : undefined;
   if (email !== undefined) {
     if (!email || !email.includes('@')) {
       return res.status(400).json({ error: 'Please enter a valid email address.' });
@@ -145,7 +147,7 @@ const forgotPasswordRateLimit = rateLimiter({ maxAttempts: 5, windowMs: 15 * 60 
 // in the system one guess at a time, which is exactly the kind of
 // information a login-adjacent endpoint should never leak.
 router.post('/forgot-password', forgotPasswordRateLimit, async (req, res) => {
-  const { email } = req.body;
+  const email = (req.body.email || '').trim().toLowerCase();
   const genericMessage = 'If that email has an account, a new password has been sent to it.';
   if (!email) return res.status(400).json({ error: 'Email is required.' });
   const user = await prisma.user.findUnique({ where: { email } });
@@ -339,16 +341,38 @@ router.get('/employees', requireAuth, async (req, res) => {
 // are optional (role defaults to EMPLOYEE). Emails the new person their
 // login so nothing has to be relayed manually.
 router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { fullName, email, phone, password, role, jobTitle, reportingManagerId } = req.body;
+  const { fullName, phone, password, role, jobTitle, reportingManagerId } = req.body;
+  // Normalized once here, then every check and the eventual create()
+  // below all use this same lowercase form — otherwise "John@Gmail.com"
+  // saves as typed, but login normalizes what someone types to
+  // lowercase, and the two would never match. Same root cause either
+  // way: case mismatch between how an email was stored and how it's
+  // looked up, silently breaking login with no indication why.
+  const email = (req.body.email || '').trim().toLowerCase();
   if (!fullName || !email || !password) {
     return res.status(400).json({ error: 'Name, email, and a starting password are required.' });
   }
   if (password.length < 8) {
     return res.status(400).json({ error: 'Password must be at least 8 characters.' });
   }
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) {
-    return res.status(400).json({ error: 'Someone with that email already has an account.' });
+  // Check email, phone, and name — same idea as the public lead form's
+  // duplicate check, but stricter here since this creates an actual
+  // login account, not just a lead record. Checked as three separate
+  // queries rather than one combined OR so the error message can say
+  // exactly which field matched, rather than a vague "something matched."
+  const existingByEmail = await prisma.user.findUnique({ where: { email } });
+  if (existingByEmail) {
+    return res.status(400).json({ error: `Someone with that email already has an account (${existingByEmail.fullName}).` });
+  }
+  if (phone) {
+    const existingByPhone = await prisma.user.findFirst({ where: { phone } });
+    if (existingByPhone) {
+      return res.status(400).json({ error: `Someone with that phone number already has an account (${existingByPhone.fullName}).` });
+    }
+  }
+  const existingByName = await prisma.user.findFirst({ where: { fullName: { equals: fullName, mode: 'insensitive' } } });
+  if (existingByName) {
+    return res.status(400).json({ error: `Someone named "${existingByName.fullName}" already has an account (${existingByName.email}). If this is a different person, consider adding a distinguishing detail to the name.` });
   }
   const chosenRole = role && VALID_ROLES.includes(role) ? role : 'EMPLOYEE';
   const passwordHash = await bcrypt.hash(password, 10);
@@ -360,7 +384,7 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
   sendMail({
     to: email,
     subject: `Your Dream2Fly account is ready`,
-    body: `Hi ${fullName},\n\nYou've been added to Dream2Fly's system. Here's how to sign in:\n\nPortal: https://dream2fly.co.uk/login.html\nEmail: ${email}\nPassword: ${password}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
+    body: `Hi ${fullName},\n\nYou've been added to Dream2Fly's system. Here's how to sign in:\n\nPortal: https://www.dream2fly.co.uk/login.html\nEmail: ${email}\nPassword: ${password}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
   }).catch(err => console.error('[employees/create] Welcome email failed:', err.message));
   res.status(201).json({ id: created.id, fullName: created.fullName, email: created.email, role: created.role });
 });
@@ -372,7 +396,8 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
 // individually logged and permission-checked rather than one big
 // catch-all update.
 router.patch('/employees/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { fullName, email, phone, jobTitle, dateOfBirth, dateOfJoining, emergencyContactName, emergencyContactPhone, emergencyContactRelation, currentAddress, permanentAddress, bloodGroup } = req.body;
+  const { fullName, phone, jobTitle, dateOfBirth, dateOfJoining, emergencyContactName, emergencyContactPhone, emergencyContactRelation, currentAddress, permanentAddress, bloodGroup } = req.body;
+  const email = req.body.email !== undefined ? (req.body.email || '').trim().toLowerCase() : undefined;
   const target = await prisma.user.findUnique({ where: { id: req.params.id } });
   if (!target) return res.status(404).json({ error: 'User not found.' });
   if (email && email !== target.email) {
@@ -460,7 +485,7 @@ router.patch('/employees/:id/reset-password', requireAuth, async (req, res) => {
   sendMail({
     to: target.email,
     subject: `Your Dream2Fly password has been reset`,
-    body: `Hi ${target.fullName},\n\nYour password was reset by ${req.user.fullName}. Here's your new password:\n\n${finalPassword}\n\nPlease sign in and change it to something memorable as soon as you can.\n\nPortal: https://dream2fly.co.uk/login.html\n\nIf this wasn't expected, contact your admin right away.\n\nBest,\nDream2Fly`,
+    body: `Hi ${target.fullName},\n\nYour password was reset by ${req.user.fullName}. Here's your new password:\n\n${finalPassword}\n\nPlease sign in and change it to something memorable as soon as you can.\n\nPortal: https://www.dream2fly.co.uk/login.html\n\nIf this wasn't expected, contact your admin right away.\n\nBest,\nDream2Fly`,
   }).catch(err => console.error('[reset-password] Email failed:', err.message));
   res.json({ success: true, newPassword: finalPassword });
 });

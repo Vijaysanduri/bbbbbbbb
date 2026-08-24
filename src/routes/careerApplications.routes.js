@@ -17,7 +17,8 @@ const VALID_CATEGORIES = ['EMPLOYEE', 'CHANNEL_PARTNER', 'COLLABORATION'];
 // out to us" form, not a job application with attachments — if someone's
 // promising, a real conversation happens after Admin reviews this.
 router.post('/public', async (req, res) => {
-  const { category, fullName, email, phone, message } = req.body;
+  const { category, fullName, phone, message } = req.body;
+  const email = (req.body.email || '').trim().toLowerCase();
   if (!fullName || !email || !category || !VALID_CATEGORIES.includes(category)) {
     return res.status(400).json({ error: 'Full name, email, and a valid category are required.' });
   }
