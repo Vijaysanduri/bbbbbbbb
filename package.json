@@ -1,7 +1,7 @@
 {
   "name": "dream2fly-backend",
   "version": "1.0.0",
-  "description": "Dream2Fly Consulting — backend API (auth, leads, tasks, users) matching the Employee Dashboard v1.0 prototype",
+  "description": "Dream2Fly Consulting \u2014 backend API (auth, leads, tasks, users) matching the Employee Dashboard v1.0 prototype",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
