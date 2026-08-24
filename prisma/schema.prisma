@@ -331,6 +331,7 @@ model User {
   targetedStudentDocRequirements StudentDocRequirement[] @relation("StudentDocRequirementTarget")
   reviewedSignableDocumentAcks   SignableDocumentAck[] @relation("SignableDocumentAckReviewer")
   paymentEventActions            PaymentEvent[] @relation("PaymentEventActor")
+  errorLogs                      ErrorLog[]
   termsUpdates                   TermsAndConditions[]
   createdAutomationRules         AutomationRule[]
   automationSentLogsReceived     AutomationSentLog[] @relation("AutomationSentLogUser")
@@ -645,6 +646,23 @@ model ActivityLog {
   actorId   String?
   actor     User?    @relation(fields: [actorId], references: [id])
   createdAt DateTime @default(now())
+}
+
+// Every unhandled backend error, caught centrally rather than scattered
+// console.error calls that only ever show up in Railway's logs. Admin
+// can now see "something broke" the moment it happens, in the app
+// itself, instead of finding out when a candidate or employee reports it.
+model ErrorLog {
+  id         String   @id @default(cuid())
+  message    String   @db.Text
+  stack      String?  @db.Text
+  method     String?  // e.g. "POST"
+  path       String?  // e.g. "/api/leads/abc123/comments"
+  statusCode Int?
+  userId     String?  // who was logged in when this happened, if anyone
+  user       User?    @relation(fields: [userId], references: [id])
+  resolved   Boolean  @default(false)
+  createdAt  DateTime @default(now())
 }
 
 enum AttendanceStatus {
