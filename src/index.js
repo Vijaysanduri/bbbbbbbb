@@ -17,6 +17,7 @@ const mediaRoutes = require('./routes/media.routes');
 const themeRoutes = require('./routes/theme.routes');
 const documentTemplatesRoutes = require('./routes/documentTemplates.routes');
 const searchRoutes = require('./routes/search.routes');
+const errorLogsRoutes = require('./routes/errorLogs.routes');
 const termsRoutes = require('./routes/terms.routes');
 const automationRoutes = require('./routes/automation.routes');
 const onboardingFieldsRoutes = require('./routes/onboardingFields.routes');
@@ -89,6 +90,7 @@ app.use('/api/media', mediaRoutes);
 app.use('/api/theme', themeRoutes);
 app.use('/api/document-templates', documentTemplatesRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/error-logs', errorLogsRoutes);
 app.use('/api/terms', termsRoutes);
 app.use('/api/automation', automationRoutes);
 app.use('/api/onboarding-fields', onboardingFieldsRoutes);
@@ -113,9 +115,31 @@ app.use('/api/payments', paymentsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
 // Centralized error handler — keeps stack traces out of API responses.
+// Now also writes every error to the ErrorLog table (in addition to the
+// console.error that already happened, unchanged) so Admin can see
+// what's actually breaking from inside the app itself, instead of only
+// finding out via Railway's logs or a candidate/employee reporting it.
 app.use((err, req, res, next) => {
   console.error(err);
+  const { logError } = require('./utils/errorLogger');
+  logError(err, req).catch(() => {}); // never let logging itself throw
   res.status(err.status || 500).json({ error: err.message || 'Something went wrong on our end.' });
+});
+
+// Safety net for anything that happens outside a normal HTTP request —
+// the background lead-SLA scheduler below, for instance, runs on its
+// own timer and would never pass through the Express error handler
+// above if something in it threw. Logged the same way, just with no
+// req/user context since there isn't one.
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err);
+  const { logError } = require('./utils/errorLogger');
+  logError(err, null).catch(() => {});
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  const { logError } = require('./utils/errorLogger');
+  logError(err, null).catch(() => {});
 });
 
 const PORT = process.env.PORT || 4000;
