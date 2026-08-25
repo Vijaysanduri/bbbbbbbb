@@ -7,7 +7,10 @@
   "scripts": {
     "postinstall": "prisma generate",
     "dev": "nodemon src/index.js",
-    "start": "npx prisma generate && npx prisma db push --accept-data-loss && node src/index.js",
+    "start": "node src/index.js",
+    "start:legacy": "npx prisma generate && npx prisma db push --accept-data-loss && node src/index.js",
+    "prisma:baseline": "mkdir -p prisma/migrations/0_init && npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/0_init/migration.sql && npx prisma migrate resolve --applied 0_init",
+    "prisma:deploy": "npx prisma generate && npx prisma migrate deploy",
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
