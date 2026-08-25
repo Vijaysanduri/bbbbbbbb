@@ -206,7 +206,9 @@ const statusEmailTemplates = {
   PENDING: { subject: 'Update on your request', body: 'Hi {{name}},\n\nYour request is pending action from our side.\n\nBest,\nDream2Fly Team' },
   IN_PROGRESS: { subject: 'We are working on it', body: 'Hi {{name}},\n\nJust a note to let you know we are actively working on this.\n\nBest,\nDream2Fly Team' },
   COMPLETED: { subject: 'This item has been completed', body: 'Hi {{name}},\n\nThis item has been completed on our end.\n\nBest,\nDream2Fly Team' },
-  OVERDUE: { subject: 'Action needed on your application', body: 'Hi {{name}},\n\nWe need action from your side to avoid delays.\n\nBest,\nDream2Fly Team' }
+  OVERDUE: { subject: 'Action needed on your application', body: 'Hi {{name}},\n\nWe need action from your side to avoid delays.\n\nBest,\nDream2Fly Team' },
+  PENDING_PARTNER: { subject: 'Waiting on your referring partner', body: 'Hi {{name}},\n\nWe are currently waiting on your referring partner for the next step. We will update you as soon as we hear back.\n\nBest,\nDream2Fly Team' },
+  PENDING_UNIVERSITY: { subject: 'Waiting on the university', body: 'Hi {{name}},\n\nWe are currently waiting to hear back from the university on your application. We will update you as soon as we have news.\n\nBest,\nDream2Fly Team' }
 };
 
 function renderTemplate(status, name) {
