@@ -1,0 +1,8 @@
+{
+  "name": "dream2fly-db-backup",
+  "private": true,
+  "description": "Standalone backup script — deliberately kept separate from the main backend's package.json so googleapis isn't pulled into the production app bundle.",
+  "dependencies": {
+    "googleapis": "^176.0.0"
+  }
+}
