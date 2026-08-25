@@ -55,6 +55,8 @@ enum TaskStatus {
   COMPLETED
   OVERDUE
   CANCELLED
+  PENDING_PARTNER
+  PENDING_UNIVERSITY
 }
 
 enum Priority {
@@ -304,7 +306,7 @@ model User {
   directReports      User[]  @relation("ReportingManager")
 
   assignedLeads Lead[]  @relation("AssignedEmployee")
-  assignedTasks Task[]  @relation("AssignedEmployee")
+  assignedTasks Task[]  @relation("AssignedEmployeeTask")
   comments      Comment[]
   activityLogs  ActivityLog[]
   featureFlags  FeatureFlag[]
@@ -599,7 +601,7 @@ model Task {
   stage String?
 
   assignedEmployeeId String?
-  assignedEmployee   User? @relation("AssignedEmployee", fields: [assignedEmployeeId], references: [id])
+  assignedEmployee   User? @relation("AssignedEmployeeTask", fields: [assignedEmployeeId], references: [id])
 
   convertedFromLeadId String? @unique
   convertedFromLead   Lead?   @relation("ConvertedFrom", fields: [convertedFromLeadId], references: [id])
