@@ -4,6 +4,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail, renderTemplate, renderQuickCandidateTemplate } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
 const { createNotification, notifyRecordWatchers } = require('../utils/notifications');
+const { toTitleCase } = require('../utils/formatting');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -448,7 +449,7 @@ router.post('/:id/convert', requireAuth, async (req, res) => {
   const task = await prisma.task.create({
     data: {
       title: `Onboard converted lead — ${lead.name}`,
-      related: lead.name,
+      related: toTitleCase(lead.name),
       country: lead.country,
       due,
       priority: 'HIGH',

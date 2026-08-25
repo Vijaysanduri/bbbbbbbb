@@ -306,6 +306,22 @@ router.get('/onboarding-directory', requireAuth, requireRole('ADMIN', 'SUPER_ADM
   res.json({ people, customFields });
 });
 
+// GET /api/auth/channel-partners — any signed-in staff member (not a
+// partner or student themselves). Powers the "Channel Partner" dropdown
+// on the Add Task / Add Lead forms — just enough to pick who a case
+// should be linked to, nothing sensitive about the partner's own account.
+router.get('/channel-partners', requireAuth, async (req, res) => {
+  if (['CHANNEL_PARTNER', 'STUDENT'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Not available for this role.' });
+  }
+  const partners = await prisma.user.findMany({
+    where: { role: 'CHANNEL_PARTNER', active: true },
+    select: { id: true, fullName: true },
+    orderBy: { fullName: 'asc' },
+  });
+  res.json(partners);
+});
+
 router.get('/employees', requireAuth, async (req, res) => {
   if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user.role)) {
     let allowed = false;

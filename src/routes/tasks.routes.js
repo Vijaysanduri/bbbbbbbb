@@ -5,6 +5,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail, renderTemplate, renderTaskStageTemplate, renderQuickCandidateTemplate, renderCaseUpdateTemplate, wrapEmailHtmlDesignB, wrapApplicationUpdateEmailHtml } = require('../utils/mailer');
 const { sendWhatsApp } = require('../utils/whatsapp');
 const { createNotification, notifyRecordWatchers } = require('../utils/notifications');
+const { toTitleCase } = require('../utils/formatting');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -107,7 +108,9 @@ function maskAdminOnlyFields(task, requesterRole) {
 
 router.get('/', requireAuth, async (req, res) => {
   const { name, country, from, to } = req.query;
+  const isPartner = req.user.role === 'CHANNEL_PARTNER';
   const where = {
+    ...(isPartner ? { referredByPartnerId: req.user.id } : {}),
     ...(name ? { related: { contains: name } } : {}),
     ...(country ? { country } : {}),
     ...(from || to ? { due: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {})
@@ -115,7 +118,10 @@ router.get('/', requireAuth, async (req, res) => {
   const tasks = await prisma.task.findMany({
     where,
     include: {
-      comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } } },
+      comments: {
+        where: isPartner ? { channel: 'CANDIDATE_FACING' } : undefined,
+        orderBy: { createdAt: 'asc' }, include: { author: { select: { id: true, fullName: true } } },
+      },
       history: { orderBy: { date: 'asc' }, include: { actor: { select: { fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
@@ -123,7 +129,25 @@ router.get('/', requireAuth, async (req, res) => {
     },
     orderBy: { due: 'asc' }
   });
-  res.json(tasks.map(t => maskAdminOnlyFields(t, req.user.role)));
+  let result = tasks.map(t => maskAdminOnlyFields(t, req.user.role));
+  if (isPartner) {
+    // A partner has no business seeing internal working notes about
+    // their own referral — same reasoning and same field list as the
+    // student-facing /me endpoint above, just for a different role.
+    result = result.map(t => {
+      t.referenceName = null;
+      t.referencePhone = null;
+      t.loanOfficialName = null;
+      t.loanOfficialContact = null;
+      t.loanNotes = null;
+      t.visaNotes = null;
+      t.interviewNotes = null;
+      t.overview = null;
+      t.confidentialNotes = null;
+      return t;
+    });
+  }
+  res.json(result);
 });
 
 // GET /api/tasks/me — Student only. Their own linked case(s), with the
@@ -229,12 +253,23 @@ router.get('/:id/overview', requireAuth, async (req, res) => {
   });
 });
 router.post('/', requireAuth, async (req, res) => {
-  const { title, related, country, due, priority, contactPhone, contactEmail } = req.body;
+  const { title, related, country, due, priority, contactPhone, contactEmail, referredByPartnerId } = req.body;
   if (!title || !related || !country || !due) {
     return res.status(400).json({ error: 'title, related, country and due are required.' });
   }
+  if (referredByPartnerId) {
+    const partner = await prisma.user.findUnique({ where: { id: referredByPartnerId } });
+    if (!partner || partner.role !== 'CHANNEL_PARTNER') {
+      return res.status(400).json({ error: 'referredByPartnerId must be an existing channel partner.' });
+    }
+  }
   const task = await prisma.task.create({
-    data: { title, related, country, due: new Date(due), priority: priority || 'MEDIUM', contactPhone: contactPhone || null, contactEmail: contactEmail || null, assignedEmployeeId: req.user.id }
+    data: {
+      title, related: toTitleCase(related), country, due: new Date(due), priority: priority || 'MEDIUM',
+      contactPhone: contactPhone || null, contactEmail: contactEmail || null,
+      assignedEmployeeId: req.user.id,
+      referredByPartnerId: referredByPartnerId || null,
+    }
   });
   await logActivity(`New task created: ${title} (related to ${related}).`, req.user.id);
   res.status(201).json(task);
@@ -471,19 +506,28 @@ router.patch('/:id/reference', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'),
 });
 
 // PATCH /api/tasks/:id/confidential-notes — Admin/Super Admin only, both
-// to set and to read (enforced here on write; enforced on read via
-// maskAdminOnlyFields above). For anything Admin wants on record that
-// genuinely shouldn't be visible to whichever employee handles the case
-// day to day.
+// to add and to read (enforced here on write; enforced on read via
+// maskAdminOnlyFields above). This is an append-only history log, not an
+// overwrite: each save adds a new dated, authored entry above whatever
+// was already recorded, so nothing prior is ever lost or edited away —
+// for anything Admin wants permanently on record that genuinely
+// shouldn't be visible to whichever employee handles the case day to day.
 router.patch('/:id/confidential-notes', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const { confidentialNotes } = req.body;
+  if (!confidentialNotes || !confidentialNotes.trim()) {
+    return res.status(400).json({ error: 'Please enter a note before saving.' });
+  }
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const author = await prisma.user.findUnique({ where: { id: req.user.id }, select: { fullName: true } });
+  const timestamp = new Date().toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const entry = `[${timestamp} — ${author ? author.fullName : 'Admin'}]\n${confidentialNotes.trim()}`;
+  const combined = task.confidentialNotes ? `${entry}\n\n${task.confidentialNotes}` : entry;
   const updated = await prisma.task.update({
     where: { id: task.id },
-    data: { confidentialNotes },
+    data: { confidentialNotes: combined },
   });
-  await logActivity(`${task.related} — confidential notes updated.`, req.user.id);
+  await logActivity(`${task.related} — confidential note added.`, req.user.id);
   res.json(updated);
 });
 
@@ -498,20 +542,6 @@ router.patch('/:id/case-type', requireAuth, async (req, res) => {
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: task.id }, data: { caseType: caseType || null } });
   await logActivity(`${task.related} — case type set to ${caseType || 'unspecified'}.`, req.user.id);
-  res.json(updated);
-});
-
-// PATCH /api/tasks/:id/confidential-notes — Admin/Super Admin only. This
-// is the one field on a task genuinely meant to stay out of Employee's
-// hands entirely, not just internal-vs-candidate-facing like the
-// regular comment channels — for anything Admin needs to record that an
-// employee handling the case specifically shouldn't see.
-router.patch('/:id/confidential-notes', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { confidentialNotes } = req.body;
-  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
-  if (!task) return res.status(404).json({ error: 'Task not found.' });
-  const updated = await prisma.task.update({ where: { id: task.id }, data: { confidentialNotes: confidentialNotes || null } });
-  await logActivity(`${task.related} — confidential notes updated.`, req.user.id);
   res.json(updated);
 });
 
