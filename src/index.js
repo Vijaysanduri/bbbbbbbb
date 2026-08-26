@@ -4,6 +4,7 @@ require('express-async-errors');
 const cors = require('cors');
 
 const authRoutes = require('./routes/auth.routes');
+const dashboardRoutes = require('./routes/dashboard.routes');
 const leadsRoutes = require('./routes/leads.routes');
 const tasksRoutes = require('./routes/tasks.routes');
 const featureFlagsRoutes = require('./routes/featureFlags.routes');
@@ -77,6 +78,7 @@ app.use((req, res, next) => {
 app.get('/api/health', (req, res) => res.json({ status: 'ok', service: 'dream2fly-backend' }));
 
 app.use('/api/auth', authRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/feature-flags', featureFlagsRoutes);
