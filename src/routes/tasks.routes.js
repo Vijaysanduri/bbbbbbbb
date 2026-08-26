@@ -272,6 +272,15 @@ router.post('/', requireAuth, async (req, res) => {
     }
   });
   await logActivity(`New task created: ${title} (related to ${related}).`, req.user.id);
+  if (referredByPartnerId) {
+    await createNotification(
+      referredByPartnerId,
+      'New case linked to your referral',
+      `${toTitleCase(related)} has been added to your dashboard — check My Applicants for the current status.`,
+      'TASK_REFERRAL',
+      'applicants'
+    );
+  }
   res.status(201).json(task);
 });
 
