@@ -57,6 +57,7 @@ enum TaskStatus {
   CANCELLED
   PENDING_PARTNER
   PENDING_UNIVERSITY
+  DUPLICATED
 }
 
 enum Priority {
