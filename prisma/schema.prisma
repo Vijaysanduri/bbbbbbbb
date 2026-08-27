@@ -227,6 +227,27 @@ model Notification {
   createdAt DateTime @default(now())
 }
 
+// One row per login, for every role — Admin, Employee, Channel Partner,
+// and Student alike. logoutAt stays null while the session is
+// considered "open"; it's set either by an explicit logout, or
+// automatically closed the moment the same user logs in again (see
+// POST /auth/login) — a JWT-based app has no server-side session to
+// know the moment someone just closes the tab without clicking
+// "Logout", so this is the practical fallback: whatever time their
+// next login happens is treated as when the previous one effectively
+// ended.
+model LoginSession {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  loginAt   DateTime  @default(now())
+  logoutAt  DateTime?
+  ipAddress String?
+  userAgent String?
+
+  @@index([userId])
+}
+
 model Branch {
   id        String   @id @default(cuid())
   name      String   @unique // "Hyderabad" | "Vijayawada" | "London"
@@ -357,6 +378,7 @@ model User {
   reviewedCareerApplications     CareerApplication[] @relation("CareerApplicationReviewer")
   uploadedMediaAssets            MediaAsset[]
   notifications                  Notification[]
+  loginSessions                  LoginSession[]
   resignations              Resignation[] @relation("ResigningEmployee")
   reviewedResignations      Resignation[] @relation("ResignationReviewer")
   clearedResignationAssets  Resignation[] @relation("ResignationAssetClearer")
