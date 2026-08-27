@@ -1,12 +1,23 @@
 // Dream2Fly — automated database backup to Google Drive.
 //
+// AUTH METHOD: OAuth2 with a refresh token tied to your own Google
+// account — not a service account key. Google's "Secure by Default"
+// policy blocks service account key downloads on many personal
+// accounts (with no way to override it, even as the account's Owner),
+// so this uses a different, equally valid credential type that isn't
+// affected by that restriction at all. See BACKUP_SETUP.md for how to
+// generate the refresh token (one-time, via Google's own OAuth
+// Playground — no coding involved).
+//
 // What this does, every time it runs:
 //   1. Runs pg_dump against DATABASE_URL, producing a compressed,
 //      pg_restore-compatible dump file (not plain SQL — smaller, and
 //      restores cleanly with `pg_restore` regardless of table order).
-//   2. Uploads it into a specific Google Drive folder, using a Service
-//      Account (no browser login involved — safe to run unattended in
-//      GitHub Actions).
+//   2. Uploads it into a specific Google Drive folder, authenticating
+//      as your own Google account via a long-lived refresh token
+//      (safe to store as a GitHub secret — it can't be used to log
+//      into your account directly, only to access Drive on its
+//      behalf, and only for what its scope allows).
 //
 // Nothing is ever deleted — every backup this has ever taken stays in
 // the Drive folder permanently, so any past day's data can be pulled
@@ -19,9 +30,11 @@
 // variables are set (see BACKUP_SETUP.md).
 //
 // Required environment variables:
-//   DATABASE_URL                — same Postgres connection string the app uses
-//   GOOGLE_SERVICE_ACCOUNT_JSON — the full service-account JSON key, as one string
-//   DRIVE_BACKUP_FOLDER_ID      — the Drive folder ID backups get uploaded into
+//   DATABASE_URL           — same Postgres connection string the app uses
+//   GOOGLE_OAUTH_CLIENT_ID     — from the OAuth client you create in Google Cloud Console
+//   GOOGLE_OAUTH_CLIENT_SECRET — from that same OAuth client
+//   GOOGLE_OAUTH_REFRESH_TOKEN — generated once via OAuth Playground
+//   DRIVE_BACKUP_FOLDER_ID  — the Drive folder ID backups get uploaded into
 
 const { execSync } = require('child_process');
 const fs = require('fs');
@@ -40,7 +53,9 @@ function requireEnv(name) {
 
 async function main() {
   const databaseUrl = requireEnv('DATABASE_URL');
-  const serviceAccountJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_JSON');
+  const clientId = requireEnv('GOOGLE_OAUTH_CLIENT_ID');
+  const clientSecret = requireEnv('GOOGLE_OAUTH_CLIENT_SECRET');
+  const refreshToken = requireEnv('GOOGLE_OAUTH_REFRESH_TOKEN');
   const folderId = requireEnv('DRIVE_BACKUP_FOLDER_ID');
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -61,19 +76,10 @@ async function main() {
   const sizeMb = (fs.statSync(dumpPath).size / (1024 * 1024)).toFixed(2);
   console.log(`Dump complete: ${sizeMb} MB`);
 
-  // --- 2. Authenticate with the service account --------------------------
-  let credentials;
-  try {
-    credentials = JSON.parse(serviceAccountJson);
-  } catch (err) {
-    console.error('GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.');
-    process.exit(1);
-  }
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/drive'],
-  });
-  const drive = google.drive({ version: 'v3', auth });
+  // --- 2. Authenticate via OAuth2 (your own Google account) ---------------
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
   // --- 3. Upload it — this is a permanent, never-deleted archive ---------
   console.log('Uploading to Google Drive (kept permanently — nothing is ever auto-deleted)...');
