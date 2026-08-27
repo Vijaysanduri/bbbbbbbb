@@ -175,19 +175,51 @@ async function sendMail({ to, subject, body, attachmentFileName, attachmentBase6
       content: attachmentBase64.includes(',') ? attachmentBase64.split(',')[1] : attachmentBase64,
     }];
   }
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
+
+  // Retries only on TRANSIENT failures — a rate limit (429) or the
+  // provider's own server hiccup (500-599). Never retries a 4xx like
+  // "invalid recipient address" or "bad request", since that would just
+  // fail identically every time and only add pointless delay.
+  //
+  // This matters specifically for the daily batch runs (scheduler.js):
+  // without this, one candidate hitting a rate limit mid-batch would
+  // silently fail that email entirely — the case would just look
+  // "not yet updated" and only actually go out the FOLLOWING day's
+  // run, which from the candidate's side looks exactly like a mail
+  // that arrived a day late for no visible reason.
+  const maxAttempts = 3;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res;
+    try {
+      res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (networkErr) {
+      lastErr = networkErr;
+      if (attempt < maxAttempts) {
+        await new Promise(r => setTimeout(r, attempt * 1000));
+        continue;
+      }
+      throw networkErr;
+    }
+    if (res.ok) return { delivered: true };
+    const isTransient = res.status === 429 || (res.status >= 500 && res.status < 600);
     const errBody = await res.text();
-    throw new Error(`Resend API error (${res.status}): ${errBody}`);
+    lastErr = new Error(`Resend API error (${res.status}): ${errBody}`);
+    if (isTransient && attempt < maxAttempts) {
+      console.warn(`[mailer] Transient error sending to ${to} (attempt ${attempt}/${maxAttempts}, status ${res.status}) — retrying shortly.`);
+      await new Promise(r => setTimeout(r, attempt * 1000));
+      continue;
+    }
+    throw lastErr;
   }
-  return { delivered: true };
+  throw lastErr;
 }
 
 // Default templates keyed by status — same content as the front-end
