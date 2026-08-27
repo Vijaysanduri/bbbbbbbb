@@ -10,6 +10,27 @@ const { toTitleCase } = require('../utils/formatting');
 const router = express.Router();
 const prisma = new PrismaClient();
 
+// Status and Stage used to be tracked completely independently, which
+// meant they could silently drift out of sync — e.g. Stage says
+// "waiting on the university" while Status still says "In Progress"
+// from three days ago, because whoever updated the case only
+// remembered to touch one of the two fields. This derives Status
+// automatically from Stage instead, so staff only ever manually
+// manage Stage going forward.
+//
+// Cancelled, Overdue, and Pending from Partner are deliberately left
+// alone here — none of them have a real Stage equivalent (Stage
+// tracks pipeline position; these are administrative flags that can
+// apply at any point in the pipeline), so a Stage change should never
+// silently clear one of them. Staff can still set these 3 explicitly.
+const STATUS_PROTECTED_VALUES = ['CANCELLED', 'OVERDUE', 'PENDING_PARTNER', 'DUPLICATED'];
+function deriveStatusFromStage(stage, currentStatus) {
+  if (STATUS_PROTECTED_VALUES.includes(currentStatus)) return currentStatus;
+  if (stage === 'COMPLETED') return 'COMPLETED';
+  if (stage === 'PENDING_FROM_UNIVERSITY') return 'PENDING_UNIVERSITY';
+  return 'IN_PROGRESS';
+}
+
 async function logActivity(text, actorId) {
   await prisma.activityLog.create({ data: { text, actorId } });
 }
@@ -354,16 +375,37 @@ router.patch('/:id/priority', requireAuth, async (req, res) => {
 // PATCH /api/tasks/:id/status
 // Body: { status }
 router.patch('/:id/status', requireAuth, async (req, res) => {
-  const { status } = req.body;
+  let { status } = req.body;
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
+  // "AUTO" is the dropdown's "Follow Stage (default)" option — staff
+  // explicitly asking to clear a manual override (Cancelled, Overdue,
+  // Pending from Partner) and let Status go back to automatically
+  // following whatever Stage already says. This is an internal
+  // correction, not a new status to announce to the candidate — they
+  // were already notified about the actual stage change separately, so
+  // no email goes out here. The internal audit trail (comment, history,
+  // activity log) still records it, just without the customer email.
+  const isAutoRevert = status === 'AUTO';
+  if (isAutoRevert) {
+    status = deriveStatusFromStage(task.stage, null);
+  }
+  // Marking something Duplicated is internal bookkeeping too — the
+  // candidate shouldn't ever receive an email saying "your status is
+  // now: Duplicated," so this skips the customer email the same way
+  // the AUTO revert above does.
+  const skipCandidateEmail = isAutoRevert || status === 'DUPLICATED';
+
   const updated = await prisma.task.update({ where: { id: task.id }, data: { status } });
-  const email = renderTemplate(status, task.related);
-  const mailResult = await sendMail({ to: `${task.related.replace(/\s+/g, '.').toLowerCase()}@example.com`, subject: email.subject, body: email.body });
+  let mailResult = { delivered: false, skipped: true };
+  if (!skipCandidateEmail) {
+    const email = renderTemplate(status, task.related);
+    mailResult = await sendMail({ to: `${task.related.replace(/\s+/g, '.').toLowerCase()}@example.com`, subject: email.subject, body: email.body });
+  }
 
   await prisma.comment.create({
-    data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}" — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.` }
+    data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}"` + (skipCandidateEmail ? (isAutoRevert ? ' (reverted to automatic, following Stage — no candidate email sent).' : ' — marked as an internal duplicate, no candidate email sent.') : ` — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.`) }
   });
   await prisma.taskHistoryEntry.create({ data: { taskId: task.id, action: `Status changed to "${status}"`, actorId: req.user.id } });
   await logActivity(`${task.related} — task "${task.title}" status changed to "${status}".`, req.user.id);
@@ -403,7 +445,10 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
-  const updated = await prisma.task.update({ where: { id: task.id }, data: { stage } });
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: { stage, status: deriveStatusFromStage(stage, task.status) },
+  });
 
   let candidateMailResult = { delivered: false, skipped: true };
   let candidateWhatsAppResult = { delivered: false, skipped: true };
@@ -823,8 +868,15 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
   const { password } = req.body;
   const studentEmail = (req.body.studentEmail || '').trim().toLowerCase();
   if (!studentEmail || !studentEmail.includes('@')) return res.status(400).json({ error: 'A valid studentEmail is required.' });
-  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  const task = await prisma.task.findUnique({ where: { id: req.params.id }, include: { student: { select: { email: true } } } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
+  // Without this, resubmitting the form (even by accident, or with a
+  // typo'd email) would silently create a brand-new account, email it
+  // real login credentials, and switch this task onto it — with no
+  // warning that it was already linked to someone else entirely.
+  if (task.studentId) {
+    return res.status(400).json({ error: `This task is already linked to ${task.student.email}. Unlink it first if you need to change which account it's connected to.` });
+  }
 
   let student = await prisma.user.findUnique({ where: { email: studentEmail } });
   let createdNewAccount = false;
@@ -855,6 +907,22 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
   }
 
   res.json({ task: updated, createdNewAccount });
+});
+
+// PATCH /api/tasks/:id/unlink-student — clears the link only. Never
+// deletes the student's account itself, even though it stays
+// unreferenced by this task afterward — the account may have its own
+// history (comments, documents, other linked tasks), and deleting user
+// records isn't something an "unlink" action should ever silently do.
+// This just gives staff a safe way to fix a mistaken link before
+// linking the correct account.
+router.patch('/:id/unlink-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  if (!task.studentId) return res.status(400).json({ error: 'This task isn\'t linked to a student account.' });
+  const updated = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: null } });
+  await logActivity(`${task.related} — student portal link removed.`, req.user.id);
+  res.json({ task: updated });
 });
 
 module.exports = router;
