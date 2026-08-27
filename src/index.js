@@ -162,9 +162,8 @@ app.listen(PORT, () => {
   // once a day (cheap, no-op most days) and only actually sends once 7+
   // days have passed since someone's last reminder, so it naturally
   // staggers correctly regardless of when the server happens to restart.
-  const { runScheduledReminders } = require('./utils/scheduler');
-  setInterval(runScheduledReminders, 24 * 60 * 60 * 1000);
-  setTimeout(runScheduledReminders, 60 * 1000); // give the server a minute to settle before the first check
+  const { startDailyScheduler } = require('./utils/scheduler');
+  startDailyScheduler();
 
   // One-time starter set for the candidate-email "Quick template" library
   // — only runs if the table is empty, so this never overwrites templates
