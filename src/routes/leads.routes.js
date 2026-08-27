@@ -217,7 +217,13 @@ router.get('/new-since', requireAuth, async (req, res) => {
   }
   const since = req.query.since ? new Date(req.query.since) : new Date(Date.now() - 60 * 1000);
   const newLeads = await prisma.lead.findMany({
-    where: { dateAdded: { gt: since } },
+    // Only genuinely unclaimed leads trigger the buzzer — a lead a
+    // staff member just typed in themselves (College, Walk-in,
+    // Referral, Other) is auto-assigned to them at creation, so there's
+    // no "someone needs to grab this" urgency to alert anyone about.
+    // Website submissions and partner referrals start unassigned, so
+    // they're exactly what this alert exists for.
+    where: { dateAdded: { gt: since }, assignedAt: null },
     select: { id: true, name: true, country: true, service: true, source: true, dateAdded: true },
     orderBy: { dateAdded: 'asc' },
   });
@@ -269,10 +275,14 @@ router.post('/', requireAuth, async (req, res) => {
     include: { history: true, followUps: true, comments: true }
   });
   await logActivity(`${lead.name} added as a new lead.`, req.user.id);
-  if (isPartner) {
-    await notifyLeadershipOfNewLead(lead, 'Channel Partner referral');
-  } else if (lead.source === 'INSTAGRAM' || lead.source === 'FACEBOOK') {
-    await notifyLeadershipOfNewLead(lead, lead.source === 'INSTAGRAM' ? 'Instagram' : 'Facebook');
+  // Only alert leadership when this lead is genuinely unclaimed
+  // (assignedAt is null) — a Channel Partner referral always starts
+  // this way, since a real employee still needs to pick it up. A
+  // staff member manually logging a College/Walk-in/Referral/Other
+  // lead auto-assigns it to themselves at creation, so there's no
+  // "someone needs to grab this" urgency — they already have it.
+  if (!lead.assignedAt) {
+    await notifyLeadershipOfNewLead(lead, isPartner ? 'Channel Partner referral' : (lead.source || 'Manual entry'));
   }
   await sendInitialWhatsAppGreeting(lead);
   res.status(201).json(lead);

@@ -147,6 +147,22 @@ router.get('/', requireAuth, async (req, res) => {
       return t;
     });
   }
+  // Powers two things on the frontend: a "hasn't been updated" filter
+  // (so Admin can pull up exactly who to raise in standup) and a
+  // general "latest update" sort/filter — both need to know, per task,
+  // when the candidate last actually heard from someone. Only counts
+  // genuine, human-written candidate-facing comments — an automatic
+  // stale-reminder resend (see scheduler.js) is deliberately NOT
+  // counted here, since the whole point of this field is to surface
+  // cases a real person hasn't touched, and a case that's already
+  // relying on the automatic reminder is exactly one of those.
+  result = result.map(t => {
+    const genuineCandidateComments = (t.comments || []).filter(c => c.channel === 'CANDIDATE_FACING' && !c.isSystem);
+    t.lastCandidateUpdateAt = genuineCandidateComments.length
+      ? genuineCandidateComments.reduce((latest, c) => (c.createdAt > latest ? c.createdAt : latest), genuineCandidateComments[0].createdAt)
+      : null;
+    return t;
+  });
   res.json(result);
 });
 
@@ -154,6 +170,30 @@ router.get('/', requireAuth, async (req, res) => {
 // task handler's contact details and only the candidate-facing comments
 // (not internal staff notes). Registered before GET /:id so "me" is
 // never mistaken for a task ID.
+// GET /api/tasks/needs-update-today — the current employee's own active
+// tasks that haven't had a genuine (non-system) candidate-facing update
+// sent yet today. Powers the 5pm daily-deadline popup on the frontend —
+// deliberately a live on-demand check rather than a scheduled email,
+// since this is meant to prompt someone who's actively at their desk,
+// not land in an inbox after they've left for the day. Registered
+// before GET /:id so "needs-update-today" is never mistaken for a task
+// ID.
+router.get('/needs-update-today', requireAuth, async (req, res) => {
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const tasks = await prisma.task.findMany({
+    where: { assignedEmployeeId: req.user.id, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+    select: {
+      id: true, taskNumber: true, related: true,
+      comments: { where: { channel: 'CANDIDATE_FACING', isSystem: false, createdAt: { gte: todayStart } }, take: 1, select: { id: true } },
+    },
+  });
+  const needsUpdate = tasks
+    .filter(t => t.comments.length === 0)
+    .map(t => ({ id: t.id, taskNumber: t.taskNumber, related: t.related }));
+  res.json(needsUpdate);
+});
+
 router.get('/me', requireAuth, requireRole('STUDENT'), async (req, res) => {
   const tasks = await prisma.task.findMany({
     where: { studentId: req.user.id },
@@ -168,20 +208,23 @@ router.get('/me', requireAuth, requireRole('STUDENT'), async (req, res) => {
   // them, it's an internal note about who referred them. Loan/visa
   // status and dates are genuinely theirs to know (many anxious
   // applicants want exactly this), but the bank official's personal
-  // contact and staff-internal notes are working details for the team,
-  // not the student — stripped the same way referencePhone is, at the
-  // API level, not just left off the UI. Same reasoning extends to
-  // interviewNotes (staff's candid assessment of how the interview
-  // went) and overview (the internal "at a glance" summary meant for a
-  // colleague, not the applicant) — neither is ever shown anywhere in
-  // the student frontend, confirmed by checking, so there's no reason
-  // for either to leave the server at all.
+  // contact, the visa agent's personal contact, and staff-internal
+  // notes are working details for the team, not the student — stripped
+  // the same way referencePhone is, at the API level, not just left off
+  // the UI. Same reasoning extends to interviewNotes (staff's candid
+  // assessment of how the interview went) and overview (the internal
+  // "at a glance" summary meant for a colleague, not the applicant) —
+  // none of these are ever shown anywhere in the student frontend,
+  // confirmed by checking, so there's no reason for any of them to
+  // leave the server at all.
   res.json(tasks.map(t => {
     t.referenceName = null;
     t.referencePhone = null;
     t.loanOfficialName = null;
     t.loanOfficialContact = null;
     t.loanNotes = null;
+    t.visaAgentName = null;
+    t.visaAgentPhone = null;
     t.visaNotes = null;
     t.interviewNotes = null;
     t.overview = null;

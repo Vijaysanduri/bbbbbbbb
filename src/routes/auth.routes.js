@@ -7,6 +7,7 @@ const { logActivity } = require('../utils/activityLog');
 const { rateLimiter } = require('../middleware/rateLimiter');
 const { generatePartnerCertificatePdf } = require('../utils/partnerCertificatePdf');
 const { generatePartnerBusinessCardPdf } = require('../utils/partnerBusinessCardPdf');
+const { sessionEffectiveEnd, sessionIsActuallyOpen } = require('../utils/sessionHelpers');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -35,10 +36,94 @@ router.post('/login', loginRateLimit, async (req, res) => {
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
   );
+  // Close out any session this user left open (they closed the tab
+  // instead of clicking Logout last time — this is the fallback for
+  // that, since a stateless JWT app has no other way to know) before
+  // starting the new one.
+  await prisma.loginSession.updateMany({
+    where: { userId: user.id, logoutAt: null },
+    data: { logoutAt: new Date() },
+  });
+  await prisma.loginSession.create({
+    data: {
+      userId: user.id,
+      ipAddress: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim() || null,
+      userAgent: req.headers['user-agent'] || null,
+    },
+  });
   res.json({
     token,
     user: { id: user.id, fullName: user.fullName, email: user.email, role: user.role, jobTitle: user.jobTitle, phone: user.phone }
   });
+});
+
+// POST /api/auth/logout — closes out the caller's current open session
+// (if any). The frontend calls this before clearing its own stored
+// token, so a login/logout history has a real logoutAt time whenever
+// someone actually clicks "Logout" rather than just closing the tab.
+router.post('/logout', requireAuth, async (req, res) => {
+  await prisma.loginSession.updateMany({
+    where: { userId: req.user.id, logoutAt: null },
+    data: { logoutAt: new Date() },
+  });
+  res.json({ success: true });
+});
+
+// GET /api/auth/login-history — Admin/Super Admin only. Every login
+// session, any role (Employee, Channel Partner, Student), newest
+// first. Filters: role, userId, from/to (matched against loginAt).
+router.get('/login-history', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { role, userId, from, to } = req.query;
+  const sessions = await prisma.loginSession.findMany({
+    where: {
+      ...(userId ? { userId } : {}),
+      ...(role ? { user: { role } } : {}),
+      ...(from || to ? { loginAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
+    },
+    include: { user: { select: { id: true, fullName: true, role: true } } },
+    orderBy: { loginAt: 'desc' },
+    take: 500,
+  });
+  res.json(sessions.map(s => ({
+    id: s.id,
+    userId: s.userId,
+    userName: s.user.fullName,
+    userRole: s.user.role,
+    loginAt: s.loginAt,
+    logoutAt: s.logoutAt,
+    durationMinutes: Math.round((sessionEffectiveEnd(s) - s.loginAt) / 60000),
+    stillOpen: sessionIsActuallyOpen(s),
+    ipAddress: s.ipAddress,
+  })));
+});
+
+// GET /api/auth/login-history/summary — Admin/Super Admin only. Total
+// hours logged in per user over a date range, for questions like "how
+// many hours has each employee actually been logged in this week" —
+// separate from the raw session-by-session list above, since crunching
+// that total is more useful done once here than repeated in the
+// frontend every time this is checked.
+router.get('/login-history/summary', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { role, from, to } = req.query;
+  const fromDate = from ? new Date(from) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const toDate = to ? new Date(to) : new Date();
+  const sessions = await prisma.loginSession.findMany({
+    where: {
+      loginAt: { gte: fromDate, lte: toDate },
+      ...(role ? { user: { role } } : {}),
+    },
+    include: { user: { select: { id: true, fullName: true, role: true } } },
+  });
+  const byUser = {};
+  for (const s of sessions) {
+    if (!byUser[s.userId]) byUser[s.userId] = { userId: s.userId, userName: s.user.fullName, userRole: s.user.role, totalMinutes: 0, sessionCount: 0, lastLoginAt: s.loginAt };
+    const end = sessionEffectiveEnd(s); // capped at token expiry — never inflates past when the session could actually still be active
+    byUser[s.userId].totalMinutes += Math.max(0, Math.round((end - s.loginAt) / 60000));
+    byUser[s.userId].sessionCount += 1;
+    if (s.loginAt > byUser[s.userId].lastLoginAt) byUser[s.userId].lastLoginAt = s.loginAt;
+  }
+  const result = Object.values(byUser).sort((a, b) => b.totalMinutes - a.totalMinutes);
+  res.json(result);
 });
 
 // GET /api/auth/me
