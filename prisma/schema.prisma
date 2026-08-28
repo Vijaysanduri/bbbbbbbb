@@ -249,6 +249,58 @@ model LoginSession {
   @@index([userId])
 }
 
+// A partner's registration name is often informal or incomplete — this
+// is the verified profile they fill in themselves after registering,
+// collecting the details actually needed for the Agreement and for
+// paying commission (bank details). The Channel Partner Agreement only
+// becomes available in their dashboard once this is fully submitted,
+// and pulls the partner's name from firstName+surname here rather than
+// the original registration's fullName, since this is the more
+// deliberately-confirmed source.
+model PartnerProfile {
+  id                       String    @id @default(cuid())
+  userId                   String    @unique
+  user                     User      @relation(fields: [userId], references: [id])
+  firstName                String?
+  surname                  String?
+  bankAccountHolderName    String?
+  bankAccountNumber        String?
+  bankIfscCode             String?
+  bankName                 String?
+  emergencyContactName     String?
+  emergencyContactPhone    String?
+  emergencyContactRelation String?
+  panCardFileData          String?   @db.Text
+  panCardFileName          String?
+  aadharCardFileData       String?   @db.Text
+  aadharCardFileName       String?
+  // Set the moment every required field above is filled and both
+  // documents are uploaded — this single timestamp is what everything
+  // else (agreement auto-send, reminder scheduler) checks against,
+  // rather than re-deriving "is this complete" from scratch everywhere.
+  submittedAt              DateTime?
+  reminderCount            Int       @default(0)
+  lastReminderAt           DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  extraAttachments         PartnerProfileAttachment[]
+}
+
+// Admin can attach additional files to a partner's profile beyond the
+// two the partner uploads themselves (PAN, Aadhar) — e.g. a signed
+// physical form scanned in, or a document collected outside the portal.
+model PartnerProfileAttachment {
+  id           String   @id @default(cuid())
+  profileId    String
+  profile      PartnerProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  fileName     String
+  fileData     String   @db.Text
+  mimeType     String
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+  uploadedAt   DateTime @default(now())
+}
+
 model Branch {
   id        String   @id @default(cuid())
   name      String   @unique // "Hyderabad" | "Vijayawada" | "London"
@@ -380,6 +432,9 @@ model User {
   uploadedMediaAssets            MediaAsset[]
   notifications                  Notification[]
   loginSessions                  LoginSession[]
+  partnerProfile                 PartnerProfile?
+  uploadedPartnerAttachments     PartnerProfileAttachment[]
+  editedComments                 CommentEditHistory[]
   resignations              Resignation[] @relation("ResigningEmployee")
   reviewedResignations      Resignation[] @relation("ResignationReviewer")
   clearedResignationAssets  Resignation[] @relation("ResignationAssetClearer")
@@ -662,6 +717,28 @@ model Comment {
   // rather than pretending it scales.
   attachmentUrl  String? @db.Text
   attachmentName String?
+
+  // A comment can be edited by whoever wrote it, or by an admin — every
+  // edit is preserved in editHistory rather than silently overwritten,
+  // so there's always a real record of what a comment used to say.
+  editedAt    DateTime?
+  editHistory CommentEditHistory[]
+}
+
+// One row per edit made to a comment — captures what the text was
+// right before that specific edit, so the full chain of changes can be
+// reconstructed later if ever needed (e.g. a dispute about what was
+// actually said to a candidate).
+model CommentEditHistory {
+  id           String   @id @default(cuid())
+  commentId    String
+  comment      Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  previousText String   @db.Text
+  editedById   String
+  editedBy     User     @relation(fields: [editedById], references: [id])
+  editedAt     DateTime @default(now())
+
+  @@index([commentId])
 }
 
 // Powers the "Recent candidate activity" standup feed.
