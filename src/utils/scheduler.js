@@ -59,6 +59,40 @@ async function sendOverdueDocumentReminders() {
 
 // Weekly reminders for students with an unpaid fee — reuses the same
 // "hasn't acted in 7+ days" pattern as document reminders above.
+// Weekly reminders for Channel Partners who haven't finished their
+// profile yet — same reasoning and cadence as the document-signing
+// reminder above (a week's grace before the first nag, then weekly
+// after that), since their Agreement can't be generated without it.
+async function sendPartnerProfileReminders() {
+  const cutoff = daysAgo(REMINDER_INTERVAL_DAYS);
+  const incomplete = await prisma.partnerProfile.findMany({
+    where: {
+      submittedAt: null,
+      OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: cutoff } }],
+    },
+    include: { user: true },
+  });
+
+  for (const profile of incomplete) {
+    if (!profile.user || profile.user.role !== 'CHANNEL_PARTNER') continue;
+    if (!profile.lastReminderAt && profile.createdAt > cutoff) continue; // same week-of-grace as document reminders
+    try {
+      await sendMail({
+        to: profile.user.email,
+        subject: `Reminder: please complete your Channel Partner profile`,
+        body: `Hi ${profile.user.fullName},\n\nYour profile still needs a few details before we can send your Channel Partner Agreement — please complete it from your portal.\n\nBest,\nDream2Fly Team`,
+      });
+      await prisma.partnerProfile.update({
+        where: { id: profile.id },
+        data: { reminderCount: { increment: 1 }, lastReminderAt: new Date() },
+      });
+    } catch (err) {
+      console.error('Scheduled partner profile reminder failed for', profile.user.email, err.message);
+    }
+  }
+  if (incomplete.length) console.log(`[scheduler] Sent ${incomplete.length} partner profile completion reminder(s).`);
+}
+
 async function sendOverduePaymentReminders() {
   const cutoff = daysAgo(REMINDER_INTERVAL_DAYS);
   const overdue = await prisma.payment.findMany({
@@ -114,8 +148,10 @@ async function sendStaleTaskUpdateReminders() {
     return;
   }
 
+  const firstStage = await prisma.taskStageOption.findFirst({ where: { active: true }, orderBy: { order: 'asc' } });
+
   const activeTasks = await prisma.task.findMany({
-    where: { studentId: { not: null }, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+    where: { studentId: { not: null }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED'] } },
     include: {
       student: true,
       assignedEmployee: true,
@@ -128,8 +164,19 @@ async function sendStaleTaskUpdateReminders() {
 
   for (const task of activeTasks) {
     if (!task.student || !task.student.email) continue;
+    // A case still sitting at the very first stage hasn't genuinely
+    // started yet — the only "update" it has is likely just the initial
+    // welcome/acknowledgment. Re-sending that a day later as if it were
+    // a status update reads as broken to the candidate ("thanks for
+    // reaching out" repeated back to them days later). Wait until the
+    // case has actually moved into real work before this applies.
+    if (firstStage && task.stage === firstStage.name) continue;
     const genuineUpdates = task.comments.filter(c => !c.isSystem);
-    if (genuineUpdates.length === 0) continue; // nothing sent yet at all — not this scheduler's job to send a first update
+    // A single message is someone's first hello to the candidate, not a
+    // status update — nothing has actually happened yet to "resend."
+    // Only once there's a second real message does it become fair to
+    // say "here's where things stand" if a day goes by with no third.
+    if (genuineUpdates.length < 2) continue;
     const lastGenuine = genuineUpdates[0];
     const reminderAlreadySentForThisStretch = task.comments.find(c => c.isSystem && c.createdAt > lastGenuine.createdAt);
 
@@ -218,6 +265,7 @@ async function runScheduledReminders() {
     await sendOverdueDocumentReminders();
     await sendOverduePaymentReminders();
     await sendStaleTaskUpdateReminders();
+    await sendPartnerProfileReminders();
   } catch (err) {
     console.error('[scheduler] Reminder run failed:', err.message);
   }
