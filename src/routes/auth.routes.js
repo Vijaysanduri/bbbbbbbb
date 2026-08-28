@@ -7,6 +7,7 @@ const { logActivity } = require('../utils/activityLog');
 const { rateLimiter } = require('../middleware/rateLimiter');
 const { generatePartnerCertificatePdf } = require('../utils/partnerCertificatePdf');
 const { generatePartnerBusinessCardPdf } = require('../utils/partnerBusinessCardPdf');
+const { deliverPartnerAgreement } = require('../utils/partnerAgreementDelivery');
 const { sessionEffectiveEnd, sessionIsActuallyOpen } = require('../utils/sessionHelpers');
 
 const router = express.Router();
@@ -318,6 +319,24 @@ router.get('/employees/:id/business-card', requireAuth, requireRole('ADMIN', 'SU
   res.send(pdfBuffer);
 });
 
+// POST /api/auth/channel-partners/:id/generate-agreement — Admin/Super
+// Admin only. Auto-fills the agreement from the partner's real account
+// data (name, ID, email, phone, address) — Business Name is the one
+// thing asked for here since no such field exists anywhere in the data
+// model. Delivers it the same way a manually-uploaded document would:
+// creates a SignableDocument + an ack for this one partner, and emails
+// them — it just appears in their portal automatically, no upload step
+// needed for this or any future partner.
+router.post('/channel-partners/:id/generate-agreement', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { businessName, effectiveDate, responseDeadline } = req.body;
+  try {
+    const doc = await deliverPartnerAgreement(req.params.id, { businessName, effectiveDate, responseDeadline, createdById: req.user.id });
+    res.status(201).json({ documentId: doc.id });
+  } catch (err) {
+    res.status(err.message.includes('not found') ? 404 : 400).json({ error: err.message });
+  }
+});
+
 // GET /api/auth/me/dashboard-access — any authenticated user. Checked
 // fresh from the DB (not the JWT) so a revoked grant takes effect
 // immediately. Used by the Admin dashboard's auth-guard: Admin/Super
@@ -487,6 +506,18 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
     subject: `Your Dream2Fly account is ready`,
     body: `Hi ${fullName},\n\nYou've been added to Dream2Fly's system. Here's how to sign in:\n\nPortal: https://www.dream2fly.co.uk/login.html\nEmail: ${email}\nPassword: ${password}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
   }).catch(err => console.error('[employees/create] Welcome email failed:', err.message));
+  // Channel Partners specifically also get asked to complete their
+  // profile — the registration name alone isn't reliably correct or
+  // complete, and the Agreement can't be generated without the bank
+  // and ID details this collects. Their Agreement only appears in
+  // their portal once this is done (see partnerProfile.routes.js).
+  if (chosenRole === 'CHANNEL_PARTNER') {
+    sendMail({
+      to: email,
+      subject: `One more step — complete your Channel Partner profile`,
+      body: `Hi ${fullName},\n\nBefore we can send over your Channel Partner Agreement, please complete your profile — your name, bank details for commission payments, an emergency contact, and your PAN and Aadhar card.\n\nYou can do this from the "Complete Your Profile" section in your portal.\n\nBest,\nDream2Fly`,
+    }).catch(err => console.error('[employees/create] Partner profile-request email failed:', err.message));
+  }
   res.status(201).json({ id: created.id, fullName: created.fullName, email: created.email, role: created.role });
 });
 

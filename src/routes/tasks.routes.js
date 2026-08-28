@@ -203,7 +203,7 @@ router.get('/needs-update-today', requireAuth, async (req, res) => {
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
   const tasks = await prisma.task.findMany({
-    where: { assignedEmployeeId: req.user.id, status: { notIn: ['COMPLETED', 'CANCELLED'] } },
+    where: { assignedEmployeeId: req.user.id, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED'] } },
     select: {
       id: true, taskNumber: true, related: true,
       comments: { where: { channel: 'CANDIDATE_FACING', isSystem: false, createdAt: { gte: todayStart } }, take: 1, select: { id: true } },
@@ -454,7 +454,15 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
   let candidateWhatsAppResult = { delivered: false, skipped: true };
   const email = renderTaskStageTemplate(stage, task.related);
 
-  if (notifyCandidate) {
+  // A task's very first stage transition (task.stage was still null/unset
+  // right before this) isn't real progress the candidate needs telling
+  // about yet — it's the case being opened, not something happening on
+  // it. Skip the candidate-facing email for this one transition even if
+  // notifyCandidate is checked; every stage change after this one is
+  // unaffected and sends normally.
+  const isFirstStageEver = !task.stage;
+
+  if (notifyCandidate && !isFirstStageEver) {
     const via = notifyCandidateVia || 'email';
     if (via === 'email' || via === 'both') {
       if (!task.contactEmail) {
