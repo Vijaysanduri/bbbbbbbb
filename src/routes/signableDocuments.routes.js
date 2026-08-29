@@ -4,6 +4,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const { logActivity } = require('../utils/activityLog');
 const { createTempViewToken, consumeTempViewToken, deleteTempViewToken } = require('../utils/tempViewLinks');
+const { generateSignatureCertificatePdf } = require('../utils/signatureCertificatePdf');
 
 // The backend's own public URL — this route is fetched directly by
 // Google's document viewer service, not through the frontend, so it
@@ -184,6 +185,46 @@ router.get('/:id/status', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR')
   res.json(acks);
 });
 
+// GET /api/signable-documents/for-user/:userId — Admin/HR/Super Admin
+// only. Every document sent to one specific person, with their signing
+// status on each — the missing link between "here's this partner's
+// profile" and "here's whether they've actually signed their
+// agreement, and when," without navigating away to hunt through the
+// full documents list.
+router.get('/for-user/:userId', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const acks = await prisma.signableDocumentAck.findMany({
+    where: { userId: req.params.userId },
+    include: { document: { select: { id: true, title: true, category: true } } },
+    orderBy: { id: 'desc' },
+  });
+  res.json(acks);
+});
+
+// GET /api/signable-documents/:id/acks/:userId/certificate — Admin
+// only. Generates a signature certificate on the fly for a typed-name
+// signature — there's no separate uploaded file in that case, so this
+// gives admin something concrete to view/download either way someone
+// signs, rather than only a line of status text.
+router.get('/:id/acks/:userId/certificate', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const ack = await prisma.signableDocumentAck.findUnique({
+    where: { documentId_userId: { documentId: req.params.id, userId: req.params.userId } },
+    include: { user: true, document: true },
+  });
+  if (!ack) return res.status(404).json({ error: 'Not found.' });
+  if (!ack.signedByTypedName) return res.status(400).json({ error: 'This was not signed by typed name.' });
+
+  const pdfBuffer = await generateSignatureCertificatePdf({
+    documentTitle: ack.document.title,
+    signerName: ack.user.fullName,
+    signerEmail: ack.user.email,
+    typedName: ack.signedByTypedName,
+    signedAt: ack.signedAt,
+  });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="Signature-Certificate-${ack.user.fullName.replace(/\s+/g, '-')}.pdf"`);
+  res.send(pdfBuffer);
+});
+
 // POST /api/signable-documents/:id/remind/:userId — Admin/HR/Super Admin
 // only. Manually sends one reminder email (see schema note: no automatic
 // recurring scheduler exists here).
@@ -264,6 +305,14 @@ router.get('/:id/download', requireAuth, async (req, res) => {
       where: { documentId_userId: { documentId: doc.id, userId: req.user.id } },
     });
     if (!ack) return res.status(403).json({ error: 'Not authorized.' });
+    // If they uploaded their own physically-signed copy, that's what
+    // "View Document" should actually show them — otherwise it always
+    // displays the original unsigned template even after completion,
+    // which looks like the signature was never captured at all.
+    if (ack.uploadedFileData) {
+      await logActivity(`${req.user.fullName} viewed their signed copy of "${doc.title}".`, req.user.id);
+      return res.json({ ...doc, fileData: ack.uploadedFileData, fileName: ack.uploadedFileName || doc.fileName });
+    }
   }
   await logActivity(`${req.user.fullName} downloaded "${doc.title}".`, req.user.id);
   res.json(doc);

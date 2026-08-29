@@ -392,9 +392,11 @@ router.get('/students-search', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 
 // for this one directory view.
 router.get('/onboarding-directory', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const { role } = req.query;
+  const STAFF_ROLES = ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN'];
   const roleFilter = role === 'CHANNEL_PARTNER' ? ['CHANNEL_PARTNER']
-    : role === 'EMPLOYEE' ? ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN']
-    : ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN', 'CHANNEL_PARTNER'];
+    : role === 'STUDENT' ? ['STUDENT']
+    : role === 'EMPLOYEE' ? STAFF_ROLES
+    : [...STAFF_ROLES, 'CHANNEL_PARTNER', 'STUDENT'];
   const people = await prisma.user.findMany({
     where: { role: { in: roleFilter }, active: true },
     select: {
