@@ -31,8 +31,8 @@ function generatePartnerAgreementPdf({ partnerName, partnerId, partnerEmail, par
     const W = doc.page.width;
     const headerBuf = Buffer.from(HEADER_BASE64, 'base64');
     const footerBuf = Buffer.from(FOOTER_BASE64, 'base64');
-    const HEADER_W = 468, HEADER_H = HEADER_W * (181 / 900);
-    const FOOTER_W = 468, FOOTER_H = FOOTER_W * (142 / 900);
+    const HEADER_W = 468, HEADER_H = HEADER_W * (300 / 1491);
+    const FOOTER_W = 468, FOOTER_H = FOOTER_W * (235 / 1491);
     const MARGIN_X = 72;
     const CONTENT_TOP = 20 + HEADER_H + 18;
     const CONTENT_BOTTOM = doc.page.height - (20 + FOOTER_H + 14);
@@ -108,7 +108,7 @@ function generatePartnerAgreementPdf({ partnerName, partnerId, partnerEmail, par
     const sigBuf = Buffer.from(SIGNATURE_BASE64, 'base64');
     const stampBuf = Buffer.from(STAMP_BASE64, 'base64');
     const sigY = doc.y;
-    doc.image(sigBuf, MARGIN_X, sigY, { width: 150, height: 150 * (123 / 450) });
+    doc.image(sigBuf, MARGIN_X, sigY, { width: 150, height: 150 * (258 / 942) });
     doc.image(stampBuf, W - MARGIN_X - 70, sigY - 10, { width: 70, height: 70 });
     doc.y = sigY + 150 * (123 / 450) + 10;
 
