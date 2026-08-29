@@ -47,7 +47,17 @@ async function checkCompletionAndMaybeSendAgreement(profile) {
   if (profile.submittedAt) return profile; // already handled once — never re-trigger on a later edit
   if (missingFields(profile).length > 0) return profile;
 
+  // Admin may have already manually sent an agreement before the
+  // partner finished their profile — without this check, completing
+  // the form afterward would trigger a second, duplicate agreement on
+  // top of the one already sent.
+  const existingAgreement = await prisma.signableDocument.findFirst({
+    where: { targetUserId: profile.userId, category: 'AGREEMENT' },
+  });
+
   const updated = await prisma.partnerProfile.update({ where: { id: profile.id }, data: { submittedAt: new Date() } });
+  if (existingAgreement) return updated;
+
   const displayName = `${profile.firstName} ${profile.surname}`.trim();
   try {
     await deliverPartnerAgreement(profile.userId, { displayName });

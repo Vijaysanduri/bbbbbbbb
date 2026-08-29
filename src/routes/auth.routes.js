@@ -293,13 +293,20 @@ router.get('/employees/:id/certificate', requireAuth, requireRole('ADMIN', 'SUPE
   const partner = await prisma.user.findUnique({ where: { id: req.params.id } });
   if (!partner) return res.status(404).json({ error: 'Partner not found.' });
   if (partner.role !== 'CHANNEL_PARTNER') return res.status(400).json({ error: 'Certificates are only for Channel Partner accounts.' });
+  // Prefer the verified name from their completed profile, if they have
+  // one — the whole reason that form asks for firstName/surname
+  // separately is to have a confirmed-correct name, and this manual
+  // button should show the same name the automatic certificate does,
+  // not risk showing a since-corrected registration name instead.
+  const profile = await prisma.partnerProfile.findUnique({ where: { userId: partner.id } });
+  const displayName = (profile && profile.firstName && profile.surname) ? `${profile.firstName} ${profile.surname}`.trim() : partner.fullName;
   const pdfBuffer = await generatePartnerCertificatePdf({
-    partnerName: partner.fullName,
+    partnerName: displayName,
     partnerId: partner.id.slice(-8).toUpperCase(),
     issueDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }),
   });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="Dream2Fly-Partner-Certificate-${partner.fullName.replace(/\s+/g, '-')}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="Dream2Fly-Partner-Certificate-${displayName.replace(/\s+/g, '-')}.pdf"`);
   res.send(pdfBuffer);
 });
 
