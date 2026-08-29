@@ -5,6 +5,7 @@ const { sendMail } = require('../utils/mailer');
 const { logActivity } = require('../utils/activityLog');
 const { createTempViewToken, consumeTempViewToken, deleteTempViewToken } = require('../utils/tempViewLinks');
 const { generateSignatureCertificatePdf } = require('../utils/signatureCertificatePdf');
+const { checkAndSendCertificateIfEligible } = require('../utils/partnerCertificateDelivery');
 
 // The backend's own public URL — this route is fetched directly by
 // Google's document viewer service, not through the frontend, so it
@@ -273,6 +274,11 @@ router.post('/:id/sign', requireAuth, async (req, res) => {
   });
   const doc = await prisma.signableDocument.findUnique({ where: { id: req.params.id } });
   await logActivity(`${req.user.fullName} signed "${doc.title}".`, req.user.id);
+  try {
+    await checkAndSendCertificateIfEligible(req.user.id, doc.category);
+  } catch (err) {
+    console.error('[signableDocuments] Certificate auto-send failed after signing:', err.message);
+  }
   res.json(updated);
 });
 
@@ -291,6 +297,11 @@ router.post('/:id/upload', requireAuth, async (req, res) => {
   });
   const doc = await prisma.signableDocument.findUnique({ where: { id: req.params.id } });
   await logActivity(`${req.user.fullName} uploaded a signed copy of "${doc.title}".`, req.user.id);
+  try {
+    await checkAndSendCertificateIfEligible(req.user.id, doc.category);
+  } catch (err) {
+    console.error('[signableDocuments] Certificate auto-send failed after upload:', err.message);
+  }
   res.json(updated);
 });
 

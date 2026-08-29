@@ -87,20 +87,78 @@ router.get('/summary', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (
 // (that stays under Partner Finance).
 router.get('/partners', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const partners = await prisma.user.findMany({ where: { role: 'CHANNEL_PARTNER' }, orderBy: { fullName: 'asc' } });
+  const partnerIds = partners.map(p => p.id);
+
+  // One batched query for everyone's agreement status, rather than a
+  // separate query per partner — this list can grow, and N+1 queries
+  // here would scale badly.
+  const agreementAcks = await prisma.signableDocumentAck.findMany({
+    where: { userId: { in: partnerIds }, document: { category: 'AGREEMENT' } },
+    select: { userId: true, signedByTypedName: true, uploadedFileData: true, signedAt: true, uploadedAt: true },
+    orderBy: { id: 'desc' },
+  });
+  const agreementByPartner = {};
+  for (const ack of agreementAcks) {
+    if (agreementByPartner[ack.userId]) continue; // orderBy desc above means the first one seen per partner is their most recent
+    const signed = !!(ack.signedByTypedName || ack.uploadedFileData);
+    agreementByPartner[ack.userId] = { status: signed ? 'SIGNED' : 'PENDING', at: ack.signedAt || ack.uploadedAt || null };
+  }
 
   const directory = await Promise.all(partners.map(async (partner) => {
-    const [referredCount, convertedCount, commissions] = await Promise.all([
+    const [referredCount, convertedCount, commissions, profile] = await Promise.all([
       prisma.lead.count({ where: { referredByPartnerId: partner.id } }),
       prisma.lead.count({ where: { referredByPartnerId: partner.id, status: 'CONVERTED' } }),
       prisma.commission.findMany({ where: { partnerId: partner.id } }),
+      prisma.partnerProfile.findUnique({ where: { userId: partner.id } }),
     ]);
     const commissionEarned = commissions.filter(c => c.status === 'PAID').reduce((sum, c) => sum + c.amount, 0);
     const commissionPending = commissions.filter(c => c.status !== 'PAID').reduce((sum, c) => sum + c.amount, 0);
+    const agreement = agreementByPartner[partner.id] || { status: 'NOT_SENT', at: null };
     return {
-      id: partner.id, fullName: partner.fullName, email: partner.email, active: partner.active,
+      id: partner.id, fullName: partner.fullName, email: partner.email, phone: partner.phone, active: partner.active,
       referredCount, convertedCount,
       conversionRate: referredCount ? Math.round((convertedCount / referredCount) * 100) : 0,
       commissionEarned, commissionPending,
+      profileComplete: !!(profile && profile.submittedAt),
+      agreementStatus: agreement.status, agreementAt: agreement.at,
+      // Full profile detail, for admin review/export — this endpoint is
+      // already Admin/Super Admin only, so it's appropriate to include
+      // bank details here rather than needing a second, separate call.
+      profileFirstName: profile ? profile.firstName : null,
+      profileSurname: profile ? profile.surname : null,
+      bankAccountHolderName: profile ? profile.bankAccountHolderName : null,
+      bankAccountNumber: profile ? profile.bankAccountNumber : null,
+      bankIfscCode: profile ? profile.bankIfscCode : null,
+      bankName: profile ? profile.bankName : null,
+      emergencyContactName: profile ? profile.emergencyContactName : null,
+      emergencyContactPhone: profile ? profile.emergencyContactPhone : null,
+      emergencyContactRelation: profile ? profile.emergencyContactRelation : null,
+      panCardUploaded: !!(profile && profile.panCardFileData),
+      aadharCardUploaded: !!(profile && profile.aadharCardFileData),
+      profileSubmittedAt: profile ? profile.submittedAt : null,
+    };
+  }));
+
+  res.json(directory);
+});
+
+// GET /api/reports/students — Admin/Super Admin only. Mirrors
+// /partners above, adapted for the Student role: each student's linked
+// case (if any) and its current stage, since that's the equivalent
+// "how are they doing" summary a student doesn't have a commission
+// figure for.
+router.get('/students', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const students = await prisma.user.findMany({ where: { role: 'STUDENT' }, orderBy: { fullName: 'asc' } });
+
+  const directory = await Promise.all(students.map(async (student) => {
+    const task = await prisma.task.findFirst({
+      where: { studentId: student.id },
+      select: { id: true, taskNumber: true, stage: true, status: true, country: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    return {
+      id: student.id, fullName: student.fullName, email: student.email, active: student.active,
+      linkedTask: task ? { id: task.id, taskNumber: task.taskNumber, stage: task.stage, status: task.status, country: task.country } : null,
     };
   }));
 
