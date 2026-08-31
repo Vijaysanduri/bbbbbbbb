@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
-const { sendMail } = require('./mailer');
+const { sendMail, wrapPromotionEmailHtml } = require('./mailer');
+const { sendWhatsApp } = require('./whatsapp');
 const { createNotification } = require('./notifications');
 const { TOKEN_LIFETIME_MS, sessionEffectiveEnd } = require('./sessionHelpers');
 
@@ -325,6 +326,110 @@ async function finalizeExpiredLoginSessions() {
   if (staleOpenSessions.length) console.log(`[scheduler] Finalized ${staleOpenSessions.length} expired login session(s).`);
 }
 
+// Resolves a scheduled campaign's recipientSource to an actual, current
+// list of people — fetched fresh every time this fires, not a snapshot
+// from when the campaign was created, so someone who joined yesterday
+// still gets tomorrow's scheduled email.
+async function fetchScheduledPromotionRecipients(recipientSource) {
+  const roleMap = { CHANNEL_PARTNER: 'CHANNEL_PARTNER', STUDENT: 'STUDENT', EMPLOYEE: 'EMPLOYEE' };
+  const role = roleMap[recipientSource];
+  if (!role) return [];
+  const users = await prisma.user.findMany({ where: { role, active: true }, select: { fullName: true, email: true, phone: true } });
+  return users.map(u => ({ name: u.fullName, email: u.email, phone: u.phone }));
+}
+
+function extractScheduleParts(scheduledAt) {
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: SCHEDULE_TIMEZONE, hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short', day: 'numeric' });
+  const parts = fmt.formatToParts(scheduledAt);
+  const get = (type) => parts.find(p => p.type === type).value;
+  return { hour: parseInt(get('hour'), 10) % 24, minute: parseInt(get('minute'), 10), weekday: get('weekday'), dayOfMonth: parseInt(get('day'), 10) };
+}
+function currentScheduleParts() {
+  return extractScheduleParts(new Date());
+}
+
+// Whether a given campaign should fire right now, checked every 5
+// minutes. Deliberately conservative — anything not clearly due yet
+// returns false, since a missed 5-minute window just gets caught on
+// the next poll, but firing early or twice would mean an unwanted
+// duplicate send.
+function isPromotionDue(promo, now) {
+  const sched = extractScheduleParts(promo.scheduledAt);
+  const cur = currentScheduleParts();
+  const todayKey = currentDateKeyInScheduleTimezone();
+  const lastSentKey = promo.lastSentAt ? new Intl.DateTimeFormat('en-CA', { timeZone: SCHEDULE_TIMEZONE }).format(promo.lastSentAt) : null;
+  const pastScheduledTimeToday = (cur.hour > sched.hour) || (cur.hour === sched.hour && cur.minute >= sched.minute);
+
+  if (promo.frequency === 'ONCE') {
+    return !promo.lastSentAt && now >= promo.scheduledAt;
+  }
+  if (lastSentKey === todayKey) return false; // already fired today — recurring campaigns fire at most once per day
+  if (promo.frequency === 'DAILY') {
+    return pastScheduledTimeToday;
+  }
+  if (promo.frequency === 'WEEKLY') {
+    return cur.weekday === sched.weekday && pastScheduledTimeToday;
+  }
+  if (promo.frequency === 'MONTHLY') {
+    // If scheduled for a day past the end of a shorter month (e.g. the
+    // 31st in a 30-day month), treat it as due on that month's last day.
+    const daysInCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const effectiveDay = Math.min(sched.dayOfMonth, daysInCurrentMonth);
+    return cur.dayOfMonth === effectiveDay && pastScheduledTimeToday;
+  }
+  return false;
+}
+
+async function runScheduledPromotions() {
+  const now = new Date();
+  const active = await prisma.scheduledPromotion.findMany({ where: { active: true } });
+  for (const promo of active) {
+    if (!isPromotionDue(promo, now)) continue;
+    try {
+      const recipients = await fetchScheduledPromotionRecipients(promo.recipientSource);
+      const wantsEmail = !promo.channel || promo.channel === 'email' || promo.channel === 'both';
+      const wantsWhatsApp = promo.channel === 'whatsapp' || promo.channel === 'both';
+      let emailsSent = 0, whatsappSent = 0;
+      for (const r of recipients) {
+        if (wantsEmail && r.email) {
+          try {
+            const personalizedBody = promo.body.replace(/\{name\}/g, r.name || 'there');
+            await sendMail({
+              to: r.email, subject: promo.subject, body: personalizedBody,
+              attachmentFileName: promo.attachmentFileName || undefined,
+              attachmentBase64: promo.attachmentBase64 || undefined,
+              customHtml: wrapPromotionEmailHtml(promo.subject, personalizedBody, promo.imageUrl || null, promo.ctaText || null, promo.ctaUrl || null),
+            });
+            emailsSent++;
+          } catch (err) { /* one bad address shouldn't stop the batch */ }
+        }
+        if (wantsWhatsApp && r.phone) {
+          try {
+            await sendWhatsApp({ to: r.phone, message: promo.body.replace(/\{name\}/g, r.name || 'there') });
+            whatsappSent++;
+          } catch (err) { /* same — keep going */ }
+        }
+      }
+      await prisma.scheduledPromotion.update({
+        where: { id: promo.id },
+        data: { lastSentAt: now, ...(promo.frequency === 'ONCE' ? { active: false } : {}) },
+      });
+      // Logged into the same history table the manual Promotions page
+      // uses, so scheduled and manual sends show up together in one
+      // place rather than needing two separate history views.
+      await prisma.promotion.create({
+        data: {
+          subject: promo.subject, body: promo.body, recipientSource: promo.recipientSource,
+          recipientCount: recipients.length, emailsSent, whatsappSent, sentById: promo.createdById,
+        },
+      });
+      console.log(`[scheduler] Scheduled promotion "${promo.subject}" sent — ${emailsSent} email(s), ${whatsappSent} WhatsApp message(s).`);
+    } catch (err) {
+      console.error(`[scheduler] Scheduled promotion "${promo.subject}" failed:`, err.message);
+    }
+  }
+}
+
 function startDailyScheduler() {
   async function check() {
     const hour = currentHourInScheduleTimezone();
@@ -338,6 +443,11 @@ function startDailyScheduler() {
       await finalizeExpiredLoginSessions();
     } catch (err) {
       console.error('[scheduler] Finalizing expired login sessions failed:', err.message);
+    }
+    try {
+      await runScheduledPromotions();
+    } catch (err) {
+      console.error('[scheduler] Scheduled promotions run failed:', err.message);
     }
   }
   check(); // covers the case where the server starts after 7pm on a day that hasn't run yet
