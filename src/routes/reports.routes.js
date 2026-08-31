@@ -142,6 +142,21 @@ router.get('/partners', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async 
   res.json(directory);
 });
 
+// GET /api/reports/partners/:id/referrals — Admin/Super Admin only. The
+// actual list behind the Referrals/Converted counts on the directory
+// above — who these candidates actually are, not just how many.
+router.get('/partners/:id/referrals', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const leads = await prisma.lead.findMany({
+    where: { referredByPartnerId: req.params.id },
+    orderBy: { dateAdded: 'desc' },
+    select: {
+      id: true, name: true, country: true, service: true, status: true,
+      dateAdded: true, convertedAt: true, contactPhone: true, contactEmail: true,
+    },
+  });
+  res.json(leads);
+});
+
 // GET /api/reports/students — Admin/Super Admin only. Mirrors
 // /partners above, adapted for the Student role: each student's linked
 // case (if any) and its current stage, since that's the equivalent

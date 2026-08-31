@@ -24,8 +24,8 @@ const REQUIRED_TEXT_FIELDS = [
 
 function missingFields(profile) {
   const missing = REQUIRED_TEXT_FIELDS.filter(([key]) => !profile[key] || !profile[key].trim()).map(([, label]) => label);
-  if (!profile.panCardFileData) missing.push('PAN card');
-  if (!profile.aadharCardFileData) missing.push('Aadhar card');
+  if (!profile.panCardFileData || profile.panCardStatus === 'REJECTED') missing.push('PAN card');
+  if (!profile.aadharCardFileData || profile.aadharCardStatus === 'REJECTED') missing.push('Aadhar card');
   return missing;
 }
 
@@ -111,7 +111,7 @@ router.post('/me/pan', requireAuth, requireRole('CHANNEL_PARTNER'), async (req, 
   const { fileName, mimeType, fileData } = req.body;
   if (!fileName || !fileData) return res.status(400).json({ error: 'fileName and fileData are required.' });
   let profile = await getOrCreateProfile(req.user.id);
-  profile = await prisma.partnerProfile.update({ where: { id: profile.id }, data: { panCardFileName: fileName, panCardFileData: fileData } });
+  profile = await prisma.partnerProfile.update({ where: { id: profile.id }, data: { panCardFileName: fileName, panCardFileData: fileData, panCardStatus: 'PENDING', panCardRejectionReason: null } });
   profile = await checkCompletionAndMaybeSendAgreement(profile);
   res.json({ ...profile, missingFields: missingFields(profile), isComplete: !!profile.submittedAt });
 });
@@ -119,7 +119,7 @@ router.post('/me/aadhar', requireAuth, requireRole('CHANNEL_PARTNER'), async (re
   const { fileName, mimeType, fileData } = req.body;
   if (!fileName || !fileData) return res.status(400).json({ error: 'fileName and fileData are required.' });
   let profile = await getOrCreateProfile(req.user.id);
-  profile = await prisma.partnerProfile.update({ where: { id: profile.id }, data: { aadharCardFileName: fileName, aadharCardFileData: fileData } });
+  profile = await prisma.partnerProfile.update({ where: { id: profile.id }, data: { aadharCardFileName: fileName, aadharCardFileData: fileData, aadharCardStatus: 'PENDING', aadharCardRejectionReason: null } });
   profile = await checkCompletionAndMaybeSendAgreement(profile);
   res.json({ ...profile, missingFields: missingFields(profile), isComplete: !!profile.submittedAt });
 });
@@ -135,6 +135,43 @@ router.get('/:userId', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (
   if (!profile) return res.json({ userId: req.params.userId, missingFields: REQUIRED_TEXT_FIELDS.map(([, l]) => l).concat(['PAN card', 'Aadhar card']), isComplete: false, extraAttachments: [] });
   res.json({ ...profile, missingFields: missingFields(profile), isComplete: !!profile.submittedAt });
 });
+
+// Shared by all 4 approve/reject endpoints below, so PAN and Aadhar
+// stay behaviorally identical rather than risking two slightly-drifted
+// copies of the same logic.
+const DOC_LABELS = { pan: 'PAN card', aadhar: 'Aadhar card' };
+async function reviewPartnerDocument(req, res, docType, decision) {
+  const statusField = docType + 'CardStatus';
+  const reasonField = docType + 'CardRejectionReason';
+  const profile = await prisma.partnerProfile.findUnique({ where: { userId: req.params.userId } });
+  if (!profile) return res.status(404).json({ error: 'Profile not found.' });
+
+  let updateData;
+  if (decision === 'APPROVED') {
+    updateData = { [statusField]: 'APPROVED', [reasonField]: null };
+  } else {
+    const { reason } = req.body;
+    if (!reason || !reason.trim()) return res.status(400).json({ error: 'A rejection reason is required.' });
+    updateData = { [statusField]: 'REJECTED', [reasonField]: reason.trim() };
+  }
+  const updated = await prisma.partnerProfile.update({ where: { id: profile.id }, data: updateData });
+
+  if (decision === 'REJECTED') {
+    const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+    if (user) {
+      sendMail({
+        to: user.email,
+        subject: `Please re-upload your ${DOC_LABELS[docType]}`,
+        body: `Hi ${user.fullName},\n\nWe reviewed the ${DOC_LABELS[docType]} you submitted and it couldn't be accepted: ${req.body.reason.trim()}\n\nPlease log in to your portal and upload a corrected copy.\n\nBest,\nDream2Fly Team`,
+      }).catch(err => console.error(`[partner-profile] ${docType} rejection email failed:`, err.message));
+    }
+  }
+  res.json({ ...updated, missingFields: missingFields(updated), isComplete: !!updated.submittedAt });
+}
+router.post('/:userId/pan/approve', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), (req, res) => reviewPartnerDocument(req, res, 'pan', 'APPROVED'));
+router.post('/:userId/pan/reject', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), (req, res) => reviewPartnerDocument(req, res, 'pan', 'REJECTED'));
+router.post('/:userId/aadhar/approve', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), (req, res) => reviewPartnerDocument(req, res, 'aadhar', 'APPROVED'));
+router.post('/:userId/aadhar/reject', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), (req, res) => reviewPartnerDocument(req, res, 'aadhar', 'REJECTED'));
 
 // POST /api/partner-profile/:userId/attachments — Admin/Super Admin
 // only. Body: { fileName, mimeType, fileData }
