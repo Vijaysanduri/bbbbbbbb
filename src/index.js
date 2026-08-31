@@ -41,6 +41,7 @@ const activityLogRoutes = require('./routes/activityLog.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const studentDocsRoutes = require('./routes/studentDocs.routes');
 const promotionsRoutes = require('./routes/promotions.routes');
+const scheduledPromotionsRoutes = require('./routes/scheduledPromotions.routes');
 const paymentsRoutes = require('./routes/payments.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
 
@@ -117,6 +118,7 @@ app.use('/api/activity-log', activityLogRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/student-docs', studentDocsRoutes);
 app.use('/api/promotions', promotionsRoutes);
+app.use('/api/scheduled-promotions', scheduledPromotionsRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
