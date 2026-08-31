@@ -133,6 +133,36 @@ model Promotion {
   createdAt       DateTime @default(now())
 }
 
+// A campaign that fires on its own, rather than a human manually
+// clicking Send. Because there's no admin present at fire time to
+// individually pick recipients (the way the manual Promotions page
+// works), recipientSource here is restricted to categories that can be
+// resolved automatically to "everyone currently active in this role" —
+// see fetchScheduledPromotionRecipients in scheduler.js.
+model ScheduledPromotion {
+  id                 String    @id @default(cuid())
+  subject            String
+  body               String    @db.Text
+  recipientSource    String    // "CHANNEL_PARTNER" | "STUDENT" | "EMPLOYEE" — the only sources resolvable without a human curating a list
+  channel            String    @default("email") // "email" | "whatsapp" | "both"
+  imageUrl           String?
+  ctaText            String?
+  ctaUrl             String?
+  attachmentFileName String?
+  attachmentBase64   String?   @db.Text
+  // "ONCE" fires once at scheduledAt then deactivates itself. "DAILY"
+  // fires every day at scheduledAt's time-of-day. "WEEKLY" fires every
+  // week on scheduledAt's day-of-week, same time. "MONTHLY" fires every
+  // month on scheduledAt's day-of-month, same time.
+  frequency          String
+  scheduledAt        DateTime
+  active             Boolean   @default(true)
+  lastSentAt         DateTime?
+  createdById        String?
+  createdBy          User?     @relation(fields: [createdById], references: [id])
+  createdAt          DateTime  @default(now())
+}
+
 enum PaymentStatus {
   PENDING
   PAID
@@ -272,14 +302,27 @@ model PartnerProfile {
   emergencyContactRelation String?
   panCardFileData          String?   @db.Text
   panCardFileName          String?
+  // Reviewed independently from Aadhar - admin can catch a wrong or
+  // unclear PAN specifically without needing to also re-request Aadhar.
+  // Kept on record even when rejected, so there's always a reference
+  // for what was actually submitted - only the review status (not the
+  // file itself) determines whether it still counts toward completion.
+  panCardStatus            PartnerDocStatus @default(PENDING)
+  panCardRejectionReason   String?
   aadharCardFileData       String?   @db.Text
   aadharCardFileName       String?
+  aadharCardStatus         PartnerDocStatus @default(PENDING)
+  aadharCardRejectionReason String?
   // Set the moment every required field above is filled and both
   // documents are uploaded — this single timestamp is what everything
   // else (agreement auto-send, reminder scheduler) checks against,
   // rather than re-deriving "is this complete" from scratch everywhere.
   submittedAt              DateTime?
   reminderCount            Int       @default(0)
+  // Set the moment the auto-certificate has been sent — the certificate
+  // fires once, when their signed Agreement is first detected, not on
+  // every subsequent visit to their signed documents.
+  certificateSentAt        DateTime?
   lastReminderAt           DateTime?
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
@@ -435,6 +478,7 @@ model User {
   partnerProfile                 PartnerProfile?
   uploadedPartnerAttachments     PartnerProfileAttachment[]
   editedComments                 CommentEditHistory[]
+  scheduledPromotions             ScheduledPromotion[]
   resignations              Resignation[] @relation("ResigningEmployee")
   reviewedResignations      Resignation[] @relation("ResignationReviewer")
   clearedResignationAssets  Resignation[] @relation("ResignationAssetClearer")
