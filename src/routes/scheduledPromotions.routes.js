@@ -6,16 +6,17 @@ const router = express.Router();
 const prisma = new PrismaClient();
 
 const VALID_SOURCES = ['CHANNEL_PARTNER', 'STUDENT', 'EMPLOYEE'];
-const VALID_FREQUENCIES = ['ONCE', 'DAILY', 'WEEKLY', 'MONTHLY'];
+const VALID_FREQUENCIES = ['ONCE', 'DAILY', 'WEEKLY', 'MONTHLY', 'CUSTOM_DAYS'];
 
 // POST /api/scheduled-promotions — Admin/Super Admin only. Creates a
 // campaign that fires on its own via the scheduler — see
 // runScheduledPromotions in scheduler.js for the actual send logic.
 router.post('/', requireAuth, requirePermission('canAccessPromotions', 'ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { subject, body, recipientSource, channel, imageUrl, ctaText, ctaUrl, attachmentFileName, attachmentBase64, frequency, scheduledAt } = req.body;
+  const { subject, body, recipientSource, channel, imageUrl, ctaText, ctaUrl, attachmentFileName, attachmentBase64, frequency, intervalDays, scheduledAt } = req.body;
   if (!subject || !body) return res.status(400).json({ error: 'subject and body are required.' });
   if (!VALID_SOURCES.includes(recipientSource)) return res.status(400).json({ error: 'recipientSource must be one of: ' + VALID_SOURCES.join(', ') });
   if (!VALID_FREQUENCIES.includes(frequency)) return res.status(400).json({ error: 'frequency must be one of: ' + VALID_FREQUENCIES.join(', ') });
+  if (frequency === 'CUSTOM_DAYS' && (!intervalDays || intervalDays < 1)) return res.status(400).json({ error: 'intervalDays (a positive number) is required when frequency is CUSTOM_DAYS.' });
   if (!scheduledAt || isNaN(new Date(scheduledAt).getTime())) return res.status(400).json({ error: 'A valid scheduledAt date/time is required.' });
 
   const promo = await prisma.scheduledPromotion.create({
@@ -23,7 +24,7 @@ router.post('/', requireAuth, requirePermission('canAccessPromotions', 'ADMIN', 
       subject, body, recipientSource, channel: channel || 'email',
       imageUrl: imageUrl || null, ctaText: ctaText || null, ctaUrl: ctaUrl || null,
       attachmentFileName: attachmentFileName || null, attachmentBase64: attachmentBase64 || null,
-      frequency, scheduledAt: new Date(scheduledAt), createdById: req.user.id,
+      frequency, intervalDays: frequency === 'CUSTOM_DAYS' ? intervalDays : null, scheduledAt: new Date(scheduledAt), createdById: req.user.id,
     },
   });
   res.status(201).json(promo);
