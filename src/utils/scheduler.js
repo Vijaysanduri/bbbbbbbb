@@ -152,7 +152,7 @@ async function sendStaleTaskUpdateReminders() {
   const firstStage = await prisma.taskStageOption.findFirst({ where: { active: true }, orderBy: { order: 'asc' } });
 
   const activeTasks = await prisma.task.findMany({
-    where: { studentId: { not: null }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED'] } },
+    where: { studentId: { not: null }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED', 'ON_HOLD'] } },
     include: {
       student: true,
       assignedEmployee: true,
@@ -376,6 +376,15 @@ function isPromotionDue(promo, now) {
     const daysInCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
     const effectiveDay = Math.min(sched.dayOfMonth, daysInCurrentMonth);
     return cur.dayOfMonth === effectiveDay && pastScheduledTimeToday;
+  }
+  if (promo.frequency === 'CUSTOM_DAYS') {
+    if (now < promo.scheduledAt) return false; // hasn't reached its first fire time yet
+    if (!promo.lastSentAt) return true; // reached its first fire time, never sent before
+    // Comparing date-only keys (not raw millisecond timestamps) avoids
+    // the day count being thrown off by a daylight-saving shift landing
+    // between two sends.
+    const daysSince = Math.round((new Date(todayKey) - new Date(lastSentKey)) / 86400000);
+    return daysSince >= (promo.intervalDays || 1);
   }
   return false;
 }

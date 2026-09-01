@@ -1,7 +1,10 @@
-// Wraps a plain-text email body in a branded HTML template — the exact
-// same header/footer banner images used on the onboarding documents
-// (hosted on the website, not embedded as base64, so emails stay small
-// and render reliably across mail clients), with the message in between.
+// Wraps a plain-text email body in a branded HTML template — the
+// header/footer banner images are hosted on the website, not embedded
+// as base64, so emails stay small and render reliably across mail
+// clients. wrapPromotionEmailHtml uses a richer header-banner.jpg
+// (compressed to ~50KB — the full-resolution source was ~440KB, too
+// heavy for email) alongside the smaller logo-mark.png the other
+// designs below still use.
 // Plain-text \n\n becomes a new paragraph; single \n becomes a line break.
 // Confirmed via direct fetch: the live site resolves at www.dream2fly.co.uk.
 // Using the non-www version here would mean every image tag in every
@@ -388,10 +391,8 @@ function wrapPromotionEmailHtml(subject, bodyText, imageUrl, ctaText, ctaUrl){
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
     <tr><td align="center">
       <table width="100%" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);" cellpadding="0" cellspacing="0">
-        <tr><td style="background:#F6C221; padding:34px 24px 28px; text-align:center;">
-          <img src="${SITE_BASE_URL}/images/email/logo-mark.png" width="52" height="45" alt="Dream2Fly" style="display:block; margin:0 auto 10px;">
-          <div style="font-size:26px; font-weight:800; color:#0B1F4D; letter-spacing:0.5px;">DREAM<span style="color:#A11D24;">2</span>FLY</div>
-          <div style="font-size:11px; font-weight:700; color:#0B1F4D; letter-spacing:2px; margin-top:2px;">CONSULTING SERVICES LIMITED</div>
+        <tr><td style="padding:0;">
+          <img src="${SITE_BASE_URL}/images/email/header-banner.jpg" alt="Dream2Fly Consulting Services Limited" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
         </td></tr>
         ${imageUrl ? `<tr><td style="padding:0;"><img src="${imageUrl}" alt="" style="display:block; width:100%; max-width:600px; height:auto;"></td></tr>` : ''}
         <tr><td style="background:linear-gradient(135deg, #0B1F4D, #1e4fa8); padding:22px 28px; text-align:center;">
