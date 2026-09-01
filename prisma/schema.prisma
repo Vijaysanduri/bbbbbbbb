@@ -58,6 +58,7 @@ enum TaskStatus {
   PENDING_PARTNER
   PENDING_UNIVERSITY
   DUPLICATED
+  ON_HOLD
 }
 
 enum Priority {
@@ -155,6 +156,12 @@ model ScheduledPromotion {
   // week on scheduledAt's day-of-week, same time. "MONTHLY" fires every
   // month on scheduledAt's day-of-month, same time.
   frequency          String
+  // Only used when frequency is "CUSTOM_DAYS" - the number of days
+  // between each repeat (e.g. 2 means it fires every 2 days). For a
+  // rotating set of different campaigns that together cycle back to the
+  // start, set this to (number of campaigns) x (days between each),
+  // with each campaign's scheduledAt staggered by that many days.
+  intervalDays       Int?
   scheduledAt        DateTime
   active             Boolean   @default(true)
   lastSentAt         DateTime?
@@ -1592,11 +1599,57 @@ model AutomationRule {
   imageUrl      String?  // also used as the WhatsApp media attachment when channel includes WhatsApp
   ctaText       String?
   ctaUrl        String?
+  // Only meaningful for LEAD_NO_RESPONSE_DAYS. false (default) is the
+  // original one-time behavior — a lead gets this email once, ever.
+  // true means the rule keeps re-sending daily to that same lead for
+  // as long as they remain unconverted, stopping automatically the
+  // moment their status changes (the query already filters out
+  // CONVERTED leads, so no separate stop condition is needed here).
+  repeatDaily   Boolean  @default(false)
   active        Boolean  @default(true)
   createdById   String?
   createdBy     User?    @relation(fields: [createdById], references: [id])
   createdAt     DateTime @default(now())
   sentLogs      AutomationSentLog[]
+  // Only used for repeatDaily rules that want genuine rotation instead
+  // of repeating the exact same message every day - see
+  // AutomationRuleMessage below. The rule's own subject/body above
+  // always serves as message #1; entries here are message #2 onward.
+  // A rule with none of these just repeats its own subject/body daily,
+  // exactly as before - this is purely additive.
+  additionalMessages AutomationRuleMessage[]
+}
+
+// Extra messages for a repeatDaily rule that rotates through several
+// different pieces of content rather than sending the same one on
+// repeat. Ordered by "order" - the rule's own subject/body is always
+// position 0 (message #1), these fill positions 1, 2, 3... The
+// scheduler picks which one to send per-lead based on how many times
+// that specific lead has already received something under this rule
+// (counted from AutomationSentLog), wrapping back to the start once it
+// reaches the end - true rotation, on each lead's own timeline, not a
+// shared calendar date.
+model AutomationRuleMessage {
+  id       String         @id @default(cuid())
+  ruleId   String
+  rule     AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  order    Int            // 1, 2, 3... determines rotation sequence after the rule's own message (position 0)
+  subject  String
+  body     String         @db.Text
+  imageUrl String?
+  ctaText  String?
+  ctaUrl   String?
+  // Both null (the default) = eligible year-round, like most rotation
+  // messages. Set both for seasonal content (e.g. an intake reminder
+  // that should only go out roughly Sept-Dec) - deliberately MONTH
+  // numbers (1-12), not full dates, so this stays evergreen and never
+  // needs updating year to year. When fromMonth > toMonth (e.g. 9 to 2)
+  // the window wraps across the new year, same as a Sept-through-Feb
+  // range naturally would.
+  activeFromMonth Int?
+  activeToMonth   Int?
+
+  @@index([ruleId])
 }
 
 // One row per (rule, recipient, period) — this is what prevents the
