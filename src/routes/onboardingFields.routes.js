@@ -30,6 +30,26 @@ router.post('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, r
   res.status(201).json(field);
 });
 
+// PATCH /api/onboarding-fields/:id — Admin/Super Admin only. Edits an
+// existing field's label/type. Already-collected values in everyone's
+// customOnboardingValues stay keyed by field id, so this doesn't
+// affect previously-submitted answers - just what the field is called
+// or how it's presented going forward.
+router.patch('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { label, fieldType } = req.body;
+  const existing = await prisma.onboardingFieldDefinition.findUnique({ where: { id: req.params.id } });
+  if (!existing) return res.status(404).json({ error: 'Field not found.' });
+  if (label !== undefined && !label.trim()) return res.status(400).json({ error: 'label cannot be empty.' });
+  const field = await prisma.onboardingFieldDefinition.update({
+    where: { id: req.params.id },
+    data: {
+      ...(label !== undefined ? { label: label.trim() } : {}),
+      ...(fieldType !== undefined && ['TEXT', 'DATE', 'TEXTAREA'].includes(fieldType) ? { fieldType } : {}),
+    },
+  });
+  res.json(field);
+});
+
 // DELETE /api/onboarding-fields/:id — Admin/Super Admin only. Soft
 // delete (active: false) rather than a real delete — keeps everyone's
 // already-answered values in customOnboardingValues intact even if the
