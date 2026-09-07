@@ -86,7 +86,8 @@ router.get('/summary', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (
 // earned — a directory view, not partner-specific finance management
 // (that stays under Partner Finance).
 router.get('/partners', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const partners = await prisma.user.findMany({ where: { role: 'CHANNEL_PARTNER' }, orderBy: { fullName: 'asc' } });
+  const showHidden = req.query.showHidden === 'true';
+  const partners = await prisma.user.findMany({ where: { role: 'CHANNEL_PARTNER', ...(showHidden ? {} : { hidden: false }) }, orderBy: { fullName: 'asc' } });
   const partnerIds = partners.map(p => p.id);
 
   // One batched query for everyone's agreement status, rather than a
@@ -115,7 +116,7 @@ router.get('/partners', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async 
     const commissionPending = commissions.filter(c => c.status !== 'PAID').reduce((sum, c) => sum + c.amount, 0);
     const agreement = agreementByPartner[partner.id] || { status: 'NOT_SENT', at: null };
     return {
-      id: partner.id, fullName: partner.fullName, email: partner.email, phone: partner.phone, active: partner.active,
+      id: partner.id, fullName: partner.fullName, email: partner.email, phone: partner.phone, active: partner.active, hidden: partner.hidden,
       referredCount, convertedCount,
       conversionRate: referredCount ? Math.round((convertedCount / referredCount) * 100) : 0,
       commissionEarned, commissionPending,
@@ -163,7 +164,8 @@ router.get('/partners/:id/referrals', requireAuth, requireRole('ADMIN', 'SUPER_A
 // "how are they doing" summary a student doesn't have a commission
 // figure for.
 router.get('/students', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const students = await prisma.user.findMany({ where: { role: 'STUDENT' }, orderBy: { fullName: 'asc' } });
+  const showHidden = req.query.showHidden === 'true';
+  const students = await prisma.user.findMany({ where: { role: 'STUDENT', ...(showHidden ? {} : { hidden: false }) }, orderBy: { fullName: 'asc' } });
 
   const directory = await Promise.all(students.map(async (student) => {
     const task = await prisma.task.findFirst({
@@ -172,7 +174,7 @@ router.get('/students', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async 
       orderBy: { createdAt: 'desc' },
     });
     return {
-      id: student.id, fullName: student.fullName, email: student.email, active: student.active,
+      id: student.id, fullName: student.fullName, email: student.email, phone: student.phone, active: student.active, hidden: student.hidden,
       linkedTask: task ? { id: task.id, taskNumber: task.taskNumber, stage: task.stage, status: task.status, country: task.country } : null,
     };
   }));

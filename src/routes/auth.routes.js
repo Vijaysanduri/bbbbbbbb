@@ -9,6 +9,7 @@ const { generatePartnerCertificatePdf } = require('../utils/partnerCertificatePd
 const { generatePartnerBusinessCardPdf } = require('../utils/partnerBusinessCardPdf');
 const { deliverPartnerAgreement } = require('../utils/partnerAgreementDelivery');
 const { sessionEffectiveEnd, sessionIsActuallyOpen } = require('../utils/sessionHelpers');
+const { buildMergeFieldValues, fillDocxTemplate, fillPlaceholders } = require('../utils/docTemplateUtils');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -170,6 +171,7 @@ router.patch('/me', requireAuth, async (req, res) => {
   }
   const user = await prisma.user.update({
     where: { id: req.user.id },
+    include: { reportingManager: { select: { fullName: true } } },
     data: {
       ...(phone !== undefined ? { phone } : {}),
       ...(email !== undefined ? { email } : {}),
@@ -190,6 +192,60 @@ router.patch('/me', requireAuth, async (req, res) => {
       ...(customOnboardingValues !== undefined ? { customOnboardingValues } : {}),
     },
   });
+  // Auto-send onboarding documents (Employment Agreement, NDA, Code of
+  // Conduct, POSH) the first time the Onboarding Form is genuinely
+  // submitted - detected by dateOfBirth being present, since "My
+  // Profile" (phone/email only) never sends that field, only this
+  // form does.
+  //
+  // Staff-only, deliberately: Channel Partner and Student accounts can
+  // also hit this same shared endpoint for basic profile fields, but
+  // this block is explicitly gated to staff roles so it can never
+  // touch their separate, already-working profile flows.
+  const STAFF_ROLES_FOR_ONBOARDING_DOCS = ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN'];
+  if (
+    STAFF_ROLES_FOR_ONBOARDING_DOCS.includes(user.role) &&
+    !user.onboardingDocsSentAt &&
+    dateOfBirth !== undefined
+  ) {
+    try {
+      const docTitles = ['Employment Agreement', 'Non-Disclosure Agreement', 'Code of Conduct & Company Policy Acknowledgment', 'Policy for Prevention of Sexual Harassment at Workplace (POSH)'];
+      const templates = await prisma.documentTemplate.findMany({ where: { title: { in: docTitles } } });
+      const customFieldDefs = await prisma.onboardingFieldDefinition.findMany({ where: { active: true } });
+      const values = buildMergeFieldValues(user, customFieldDefs);
+      for (const template of templates) {
+        let fileData, mimeType, fileName;
+        if (template.bodyType === 'TEXT') {
+          let filledText = fillPlaceholders(template.textBody, values);
+          // The Employment Agreement's CTC placeholder isn't a {{token}}
+          // (deliberately, so it can't be silently left blank if this
+          // step ever ran before the offer letter did) - substitute it
+          // here using the CTC already saved during the Offer Letter
+          // step, so HR isn't asked to enter it a second time.
+          if (user.baseSalary) filledText = filledText.replace(/₹\[TO BE FILLED BY HR\]/g, `₹${user.baseSalary}`);
+          fileData = Buffer.from(filledText, 'utf-8').toString('base64');
+          mimeType = 'text/plain';
+          fileName = `${template.title.replace(/[^a-z0-9]+/gi, '-')}.txt`;
+        } else {
+          fileData = await fillDocxTemplate(template.docxFileData, values);
+          mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+          fileName = template.docxFileName || `${template.title}.docx`;
+        }
+        const doc = await prisma.signableDocument.create({
+          data: { title: template.title, category: template.category, fileName, mimeType, fileData, createdById: user.id, targetRole: user.role, targetUserId: user.id },
+        });
+        await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: user.id } });
+        sendMail({
+          to: user.email,
+          subject: `Action needed: ${template.title}`,
+          body: `Hi ${user.fullName},\n\nA ${template.category === 'AGREEMENT' ? 'agreement' : 'document'} "${template.title}" needs your signature. Please review and sign it from your portal.\n\nBest,\nDream2Fly HR`,
+        }).catch(err => console.error('[me/onboarding-docs] Notification email failed:', err.message));
+      }
+      await prisma.user.update({ where: { id: user.id }, data: { onboardingDocsSentAt: new Date() } });
+    } catch (err) {
+      console.error('[me/onboarding-docs] Auto-sending onboarding documents failed:', err.message);
+    }
+  }
   res.json({
     id: user.id, phone: user.phone, email: user.email, dateOfBirth: user.dateOfBirth,
     emergencyContactName: user.emergencyContactName, emergencyContactPhone: user.emergencyContactPhone, emergencyContactRelation: user.emergencyContactRelation,
@@ -399,15 +455,17 @@ router.get('/students-search', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 
 // for this one directory view.
 router.get('/onboarding-directory', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const { role } = req.query;
+  const includeInactive = req.query.includeInactive === '1';
+  const showHidden = req.query.showHidden === 'true';
   const STAFF_ROLES = ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER', 'ADMIN', 'SUPER_ADMIN'];
   const roleFilter = role === 'CHANNEL_PARTNER' ? ['CHANNEL_PARTNER']
     : role === 'STUDENT' ? ['STUDENT']
     : role === 'EMPLOYEE' ? STAFF_ROLES
     : [...STAFF_ROLES, 'CHANNEL_PARTNER', 'STUDENT'];
   const people = await prisma.user.findMany({
-    where: { role: { in: roleFilter }, active: true },
+    where: { role: { in: roleFilter }, ...(includeInactive ? {} : { active: true }), ...(showHidden ? {} : { hidden: false }) },
     select: {
-      id: true, fullName: true, role: true, jobTitle: true, email: true, phone: true,
+      id: true, fullName: true, role: true, jobTitle: true, email: true, phone: true, active: true, hidden: true,
       dateOfBirth: true, dateOfJoining: true, fatherName: true, motherName: true, bloodGroup: true,
       personalEmail: true, currentAddress: true, residenceAddress: true,
       emergencyContactName: true, emergencyContactPhone: true, emergencyContactRelation: true,
@@ -456,9 +514,10 @@ router.get('/employees', requireAuth, async (req, res) => {
   // (Enable/Disable, Reset Password) needs to see everyone, and passes
   // ?includeInactive=1 explicitly to opt into that.
   const includeInactive = req.query.includeInactive === '1';
+  const showHidden = req.query.showHidden === 'true';
   const employees = await prisma.user.findMany({
-    where: includeInactive ? {} : { active: true },
-    select: { id: true, fullName: true, email: true, phone: true, role: true, active: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true, canAccessPromotions: true },
+    where: { ...(includeInactive ? {} : { active: true }), ...(showHidden ? {} : { hidden: false }) },
+    select: { id: true, fullName: true, email: true, phone: true, role: true, active: true, hidden: true, reportingManagerId: true, reportingManager: { select: { fullName: true } }, baseSalary: true, canAccessResignationsAdmin: true, canAccessEmployee360: true, canAccessPromotions: true },
     orderBy: { fullName: 'asc' },
   });
   res.json(employees);
@@ -470,7 +529,7 @@ router.get('/employees', requireAuth, async (req, res) => {
 // are optional (role defaults to EMPLOYEE). Emails the new person their
 // login so nothing has to be relayed manually.
 router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { fullName, phone, password, role, jobTitle, reportingManagerId } = req.body;
+  const { fullName, phone, password, role, jobTitle, reportingManagerId, ctc, dateOfJoining } = req.body;
   // Normalized once here, then every check and the eventual create()
   // below all use this same lowercase form — otherwise "John@Gmail.com"
   // saves as typed, but login normalizes what someone types to
@@ -504,12 +563,49 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
     return res.status(400).json({ error: `Someone named "${existingByName.fullName}" already has an account (${existingByName.email}). If this is a different person, consider adding a distinguishing detail to the name.` });
   }
   const chosenRole = role && VALID_ROLES.includes(role) ? role : 'EMPLOYEE';
+  const STAFF_ROLES_REQUIRING_OFFER_DETAILS = ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'HR', 'FINANCE', 'VISA_OFFICER', 'DOCUMENTATION_OFFICER'];
+  if (STAFF_ROLES_REQUIRING_OFFER_DETAILS.includes(chosenRole) && (!ctc || !dateOfJoining)) {
+    return res.status(400).json({ error: 'CTC and date of joining are required to generate the offer letter.' });
+  }
   const passwordHash = await bcrypt.hash(password, 10);
   const created = await prisma.user.create({
-    data: { fullName, email, phone: phone || null, passwordHash, role: chosenRole, jobTitle: jobTitle || null, reportingManagerId: reportingManagerId || null },
+    data: {
+      fullName, email, phone: phone || null, passwordHash, role: chosenRole, jobTitle: jobTitle || null, reportingManagerId: reportingManagerId || null,
+      baseSalary: ctc ? parseFloat(ctc) : null,
+      dateOfJoining: dateOfJoining ? new Date(dateOfJoining) : null,
+    },
   });
   await logActivity(`${req.user.fullName} added ${fullName} as a new ${chosenRole.replace('_', ' ').toLowerCase()}.`, req.user.id);
   const { sendMail } = require('../utils/mailer');
+  // Auto-assign any existing broadcast documents (NDA, offer letter,
+  // code of conduct, etc.) to a newly-added Employee - without this, a
+  // document uploaded before this person joined would never reach
+  // them, since acks are normally only created at upload time against
+  // whoever existed then.
+  //
+  // Deliberately staff-only: Channel Partner and Student accounts are
+  // explicitly excluded here and left completely untouched, even
+  // though both can technically be created through this same endpoint.
+  const STAFF_TARGET_ROLES = ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'];
+  if (STAFF_TARGET_ROLES.includes(chosenRole)) {
+    try {
+      // Individually-assigned documents (targetUserId set) are also
+      // excluded - those are for one specific person, not a broadcast.
+      const activeDocs = await prisma.signableDocument.findMany({
+        where: { active: true, targetUserId: null, targetRole: { in: ['EMPLOYEE', 'ALL'] } },
+      });
+      for (const doc of activeDocs) {
+        await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: created.id } });
+        sendMail({
+          to: email,
+          subject: `Action needed: ${doc.title}`,
+          body: `Hi ${fullName},\n\nA ${doc.category === 'AGREEMENT' ? 'agreement' : 'document'} "${doc.title}" needs your signature. Please review and sign it from your portal.\n\nBest,\nDream2Fly HR`,
+        }).catch(err => console.error('[employees/create] Document notification email failed:', err.message));
+      }
+    } catch (err) {
+      console.error('[employees/create] Auto-assigning existing documents failed:', err.message);
+    }
+  }
   sendMail({
     to: email,
     subject: `Your Dream2Fly account is ready`,
@@ -596,6 +692,95 @@ router.patch('/employees/:id/reactivate', requireAuth, requireRole('ADMIN', 'SUP
   if (!target) return res.status(404).json({ error: 'User not found.' });
   await prisma.user.update({ where: { id: req.params.id }, data: { active: true } });
   await logActivity(`${req.user.fullName} re-enabled ${target.fullName}'s account.`, req.user.id);
+  res.json({ success: true });
+});
+
+// PATCH /api/auth/employees/:id/hide — Admin/Super Admin only. Removes
+// someone from the default admin list view without touching their
+// data, access, or history in any way - purely a display preference.
+// Distinct from deactivate, which blocks login; hiding someone doesn't
+// affect their ability to sign in at all.
+router.patch('/employees/:id/hide', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  await prisma.user.update({ where: { id: req.params.id }, data: { hidden: true } });
+  await logActivity(`${req.user.fullName} hid ${target.fullName} from the list.`, req.user.id);
+  res.json({ success: true });
+});
+
+// PATCH /api/auth/employees/:id/unhide — Admin/Super Admin only.
+router.patch('/employees/:id/unhide', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  await prisma.user.update({ where: { id: req.params.id }, data: { hidden: false } });
+  await logActivity(`${req.user.fullName} unhid ${target.fullName}.`, req.user.id);
+  res.json({ success: true });
+});
+
+// POST /api/auth/employees/:id/offer-letter/preview — Admin/Super
+// Admin only. Fills the Offer Letter template with this person's
+// details plus the CTC/date of joining HR is about to set, WITHOUT
+// saving or sending anything - lets HR see exactly what will go out
+// before committing to it.
+router.post('/employees/:id/offer-letter/preview', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { ctc, dateOfJoining } = req.body;
+  const person = await prisma.user.findUnique({ where: { id: req.params.id }, include: { reportingManager: { select: { fullName: true } } } });
+  if (!person) return res.status(404).json({ error: 'Employee not found.' });
+  const template = await prisma.documentTemplate.findFirst({ where: { title: 'Offer Letter' } });
+  if (!template) return res.status(404).json({ error: 'No "Offer Letter" template found. Run the seed script first.' });
+  const customFieldDefs = await prisma.onboardingFieldDefinition.findMany({ where: { active: true } });
+  // Preview-only overrides - not saved to the person's actual record
+  // yet, just used to render what the letter would look like.
+  const previewPerson = { ...person, dateOfJoining: dateOfJoining ? new Date(dateOfJoining) : person.dateOfJoining };
+  const values = buildMergeFieldValues(previewPerson, customFieldDefs);
+  let filled = fillPlaceholders(template.textBody, values);
+  if (ctc) filled = filled.replace(/₹\[TO BE FILLED BY HR\]/g, `₹${ctc}`);
+  res.json({ preview: filled });
+});
+
+// POST /api/auth/employees/:id/offer-letter/send — Admin/Super Admin
+// only. Saves the CTC and date of joining to the employee's actual
+// record, generates the final Offer Letter as a real signable
+// document, and sends it. This is the one document that is NOT part
+// of the automatic on-hire assignment - it deliberately waits for HR
+// to confirm CTC and date of joining here first.
+router.post('/employees/:id/offer-letter/send', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { ctc, dateOfJoining } = req.body;
+  if (!ctc || !dateOfJoining) return res.status(400).json({ error: 'Both CTC and date of joining are required to send the offer letter.' });
+  const person = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!person) return res.status(404).json({ error: 'Employee not found.' });
+  if (person.offerLetterSentAt) {
+    return res.status(400).json({ error: `An offer letter was already sent to ${person.fullName} on ${person.offerLetterSentAt.toLocaleDateString('en-GB')}. Edit their record directly if it needs correcting.` });
+  }
+  const template = await prisma.documentTemplate.findFirst({ where: { title: 'Offer Letter' } });
+  if (!template) return res.status(404).json({ error: 'No "Offer Letter" template found. Run the seed script first.' });
+
+  const updated = await prisma.user.update({
+    where: { id: person.id },
+    data: { dateOfJoining: new Date(dateOfJoining), baseSalary: parseFloat(ctc) },
+    include: { reportingManager: { select: { fullName: true } } },
+  });
+  const customFieldDefs = await prisma.onboardingFieldDefinition.findMany({ where: { active: true } });
+  const values = buildMergeFieldValues(updated, customFieldDefs);
+  let filled = fillPlaceholders(template.textBody, values);
+  filled = filled.replace(/₹\[TO BE FILLED BY HR\]/g, `₹${ctc}`);
+
+  const doc = await prisma.signableDocument.create({
+    data: {
+      title: template.title, category: template.category,
+      fileName: 'Offer-Letter.txt', mimeType: 'text/plain',
+      fileData: Buffer.from(filled, 'utf-8').toString('base64'),
+      createdById: req.user.id, targetRole: person.role, targetUserId: person.id,
+    },
+  });
+  await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: person.id } });
+  sendMail({
+    to: person.email,
+    subject: `Your Offer of Employment — Dream2Fly Consulting Services`,
+    body: `Hi ${person.fullName},\n\nYour offer letter is ready for review and signature. Please sign in to your portal to view and accept it.\n\nBest,\nDream2Fly HR`,
+  }).catch(err => console.error('[offer-letter/send] Notification email failed:', err.message));
+  await prisma.user.update({ where: { id: person.id }, data: { offerLetterSentAt: new Date() } });
+  await logActivity(`${req.user.fullName} sent the Offer Letter to ${person.fullName} (CTC ₹${ctc}, joining ${dateOfJoining}).`, req.user.id);
   res.json({ success: true });
 });
 
