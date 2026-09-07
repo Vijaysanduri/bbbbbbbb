@@ -47,6 +47,7 @@ enum LeadStatus {
   VISA_APPROVED
   VISA_REFUSED
   CONVERTED
+  NOT_INTERESTED
 }
 
 enum TaskStatus {
@@ -396,6 +397,15 @@ model User {
   // Form genuinely extensible without needing a schema change (and a
   // redeploy) every time someone wants one more field collected.
   customOnboardingValues   Json?
+  // Set the first time the Onboarding Form is submitted and the
+  // Employment Agreement/NDA/Code of Conduct/POSH have been
+  // auto-generated and sent - prevents re-sending every time the
+  // employee later edits their onboarding details. Null = not sent yet.
+  onboardingDocsSentAt     DateTime?
+  // Set once the Offer Letter is actually sent - prevents an
+  // accidental double-click (or navigating back and resending) from
+  // creating a duplicate document and emailing the candidate twice.
+  offerLetterSentAt        DateTime?
   // When this person last clicked "I Agree" on their role's Terms &
   // Conditions. Compared against TermsAndConditions.updatedAt for their
   // role to know whether they've accepted the current text — if the
@@ -407,6 +417,14 @@ model User {
   // allowances/deductions — that's a bigger feature than what's built here.
   baseSalary   Float?
   active       Boolean  @default(true)
+  // Distinct from "active" - active blocks login and unassigns them
+  // from work, but they still show up in admin lists (correctly, since
+  // "disabled" is something admin needs to see and can undo anytime).
+  // hidden instead removes someone from the default list view entirely
+  // - for admin decluttering old/irrelevant records - while keeping
+  // every bit of their data and history fully intact. Reversible via a
+  // "Show Hidden" toggle on each list.
+  hidden       Boolean  @default(false)
   country      String?  // relevant for STUDENT role — which destination their checklist should show
   branchId     String?
   branch       Branch?  @relation(fields: [branchId], references: [id])
@@ -520,6 +538,10 @@ model Lead {
   country     String
   service     String
   source      LeadSource @default(OTHER)
+  // Reversible, admin-only decluttering - removes from the default
+  // list view without touching any data. Distinct from status (e.g.
+  // NOT_INTERESTED), which records an actual outcome.
+  hidden      Boolean    @default(false)
   status      LeadStatus @default(ENQUIRY_RECEIVED)
   dateAdded   DateTime   @default(now())
   convertedAt DateTime?
@@ -615,6 +637,9 @@ model Task {
   title    String
   related  String     // candidate/partner name this task is about
   country  String
+  // Same purpose as Lead.hidden - reversible list decluttering,
+  // separate from status (e.g. CANCELLED), which records an outcome.
+  hidden   Boolean    @default(false)
   due      DateTime
   priority Priority   @default(MEDIUM)
   status   TaskStatus @default(PENDING)
