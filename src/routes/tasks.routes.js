@@ -23,7 +23,7 @@ const prisma = new PrismaClient();
 // tracks pipeline position; these are administrative flags that can
 // apply at any point in the pipeline), so a Stage change should never
 // silently clear one of them. Staff can still set these 3 explicitly.
-const STATUS_PROTECTED_VALUES = ['CANCELLED', 'OVERDUE', 'PENDING_PARTNER', 'DUPLICATED'];
+const STATUS_PROTECTED_VALUES = ['CANCELLED', 'OVERDUE', 'PENDING_PARTNER', 'DUPLICATED', 'ON_HOLD'];
 function deriveStatusFromStage(stage, currentStatus) {
   if (STATUS_PROTECTED_VALUES.includes(currentStatus)) return currentStatus;
   if (stage === 'COMPLETED') return 'COMPLETED';
@@ -130,11 +130,18 @@ function maskAdminOnlyFields(task, requesterRole) {
 router.get('/', requireAuth, async (req, res) => {
   const { name, country, from, to } = req.query;
   const isPartner = req.user.role === 'CHANNEL_PARTNER';
+  const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(req.user.role);
+  const showHidden = req.query.showHidden === 'true';
   const where = {
     ...(isPartner ? { referredByPartnerId: req.user.id } : {}),
     ...(name ? { related: { contains: name } } : {}),
     ...(country ? { country } : {}),
-    ...(from || to ? { due: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {})
+    ...(from || to ? { due: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
+    // hidden is purely an Admin-side decluttering preference, not a real
+    // status change - Employees and Partners always see their own
+    // assigned/referred tasks in full, regardless of what Admin has
+    // chosen to declutter from their own view.
+    ...(isAdmin && !showHidden ? { hidden: false } : {}),
   };
   const tasks = await prisma.task.findMany({
     where,
@@ -203,7 +210,7 @@ router.get('/needs-update-today', requireAuth, async (req, res) => {
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
   const tasks = await prisma.task.findMany({
-    where: { assignedEmployeeId: req.user.id, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED'] } },
+    where: { assignedEmployeeId: req.user.id, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED', 'ON_HOLD'] } },
     select: {
       id: true, taskNumber: true, related: true,
       comments: { where: { channel: 'CANDIDATE_FACING', isSystem: false, createdAt: { gte: todayStart } }, take: 1, select: { id: true } },
@@ -636,6 +643,84 @@ router.patch('/:id/confidential-notes', requireAuth, requireRole('ADMIN', 'SUPER
   res.json(updated);
 });
 
+// POST /api/tasks/:id/confidential-notes/entries — Admin/Super Admin
+// only. Adds one dated entry to the new structured model, optionally
+// with one attached document. This is the one the UI should use going
+// forward - the PATCH endpoint above stays only for whatever old code
+// might still call it, writing to the legacy text field.
+router.post('/:id/confidential-notes/entries', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { text, attachmentFileName, attachmentMimeType, attachmentData, noteDate } = req.body;
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Please enter a note before saving.' });
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  let createdAt;
+  if (noteDate) {
+    createdAt = new Date(noteDate);
+    if (isNaN(createdAt.getTime())) return res.status(400).json({ error: 'Invalid date.' });
+    if (createdAt.getTime() > Date.now() + 60 * 1000) return res.status(400).json({ error: "A note's date can't be set in the future." });
+  }
+  const entry = await prisma.taskConfidentialNote.create({
+    data: {
+      taskId: task.id, authorId: req.user.id, text: text.trim(),
+      attachmentFileName: attachmentFileName || null, attachmentMimeType: attachmentMimeType || null, attachmentData: attachmentData || null,
+      ...(createdAt ? { createdAt } : {}),
+    },
+    include: { author: { select: { fullName: true } } },
+  });
+  await logActivity(`${task.related} — confidential note added.`, req.user.id);
+  res.status(201).json(entry);
+});
+
+// GET /api/tasks/:id/confidential-notes/entries — Admin/Super Admin
+// only. Newest first, matching how the legacy text log already reads.
+router.get('/:id/confidential-notes/entries', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const entries = await prisma.taskConfidentialNote.findMany({
+    where: { taskId: req.params.id },
+    include: { author: { select: { fullName: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  // Don't send attachmentData in the list response - could be a large
+  // base64 blob per entry, and the list view doesn't need file bytes,
+  // just whether one exists. Fetched separately via the endpoint below
+  // only when someone actually clicks to open/download it.
+  res.json(entries.map(e => ({ ...e, attachmentData: undefined, hasAttachment: !!e.attachmentData })));
+});
+
+// GET /api/tasks/:id/confidential-notes/entries/:noteId/attachment —
+// Admin/Super Admin only. Returns the one attachment's file data.
+router.get('/:id/confidential-notes/entries/:noteId/attachment', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const entry = await prisma.taskConfidentialNote.findUnique({ where: { id: req.params.noteId } });
+  if (!entry || entry.taskId !== req.params.id || !entry.attachmentData) return res.status(404).json({ error: 'Attachment not found.' });
+  res.json({ fileName: entry.attachmentFileName, mimeType: entry.attachmentMimeType, fileData: entry.attachmentData });
+});
+
+// GET /api/tasks/:id/confidential-notes/export — Admin/Super Admin
+// only. Every entry (both the new structured ones and whatever's left
+// in the legacy text field) as one plain-text file, newest first.
+router.get('/:id/confidential-notes/export', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const entries = await prisma.taskConfidentialNote.findMany({
+    where: { taskId: req.params.id },
+    include: { author: { select: { fullName: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  const lines = [`Confidential Notes — ${task.related}`, '='.repeat(50), ''];
+  entries.forEach(e => {
+    const ts = e.createdAt.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    lines.push(`[${ts} — ${e.author ? e.author.fullName : 'Admin'}]`);
+    lines.push(e.text);
+    if (e.attachmentFileName) lines.push(`(Attachment: ${e.attachmentFileName})`);
+    lines.push('');
+  });
+  if (task.confidentialNotes) {
+    lines.push('--- Older entries (legacy log) ---', '', task.confidentialNotes);
+  }
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="confidential-notes-${task.taskNumber}.txt"`);
+  res.send(lines.join('\n'));
+});
+
 // PATCH /api/tasks/:id/case-type — any staff role, same access as the
 // rest of a task's basic case details (course, college, etc.).
 router.patch('/:id/case-type', requireAuth, async (req, res) => {
@@ -930,6 +1015,28 @@ router.patch('/:id/unlink-student', requireAuth, requireRole('ADMIN', 'SUPER_ADM
   if (!task.studentId) return res.status(400).json({ error: 'This task isn\'t linked to a student account.' });
   const updated = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: null } });
   await logActivity(`${task.related} — student portal link removed.`, req.user.id);
+  res.json({ task: updated });
+});
+
+// PATCH /api/tasks/:id/hide — Admin/Super Admin only. Removes the task
+// from the default list view without touching any of its data, history,
+// comments, or documents - purely a display preference, reversible via
+// the "Show Hidden" toggle. Distinct from status (e.g. Cancelled),
+// which records an actual case outcome.
+router.patch('/:id/hide', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({ where: { id: req.params.id }, data: { hidden: true } });
+  await logActivity(`${task.related} — task hidden from the list by ${req.user.fullName}.`, req.user.id);
+  res.json({ task: updated });
+});
+
+// PATCH /api/tasks/:id/unhide — Admin/Super Admin only.
+router.patch('/:id/unhide', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({ where: { id: req.params.id }, data: { hidden: false } });
+  await logActivity(`${task.related} — task unhidden by ${req.user.fullName}.`, req.user.id);
   res.json({ task: updated });
 });
 

@@ -86,7 +86,7 @@ router.get('/me', requireAuth, requireRole('CHANNEL_PARTNER'), async (req, res) 
 // every required field is actually present at the time this runs, not
 // by whether this is "the submit click" specifically.
 router.patch('/me', requireAuth, requireRole('CHANNEL_PARTNER'), async (req, res) => {
-  const { firstName, surname, bankAccountHolderName, bankAccountNumber, bankIfscCode, bankName, emergencyContactName, emergencyContactPhone, emergencyContactRelation } = req.body;
+  const { firstName, surname, bankAccountHolderName, bankAccountNumber, bankIfscCode, bankName, emergencyContactName, emergencyContactPhone, emergencyContactRelation, customValues } = req.body;
   let profile = await getOrCreateProfile(req.user.id);
   profile = await prisma.partnerProfile.update({
     where: { id: profile.id },
@@ -100,6 +100,7 @@ router.patch('/me', requireAuth, requireRole('CHANNEL_PARTNER'), async (req, res
       ...(emergencyContactName !== undefined ? { emergencyContactName } : {}),
       ...(emergencyContactPhone !== undefined ? { emergencyContactPhone } : {}),
       ...(emergencyContactRelation !== undefined ? { emergencyContactRelation } : {}),
+      ...(customValues !== undefined ? { customValues } : {}),
     },
   });
   profile = await checkCompletionAndMaybeSendAgreement(profile);

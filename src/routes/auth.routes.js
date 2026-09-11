@@ -462,7 +462,7 @@ router.get('/onboarding-directory', requireAuth, requireRole('ADMIN', 'SUPER_ADM
     : role === 'STUDENT' ? ['STUDENT']
     : role === 'EMPLOYEE' ? STAFF_ROLES
     : [...STAFF_ROLES, 'CHANNEL_PARTNER', 'STUDENT'];
-  const people = await prisma.user.findMany({
+  let people = await prisma.user.findMany({
     where: { role: { in: roleFilter }, ...(includeInactive ? {} : { active: true }), ...(showHidden ? {} : { hidden: false }) },
     select: {
       id: true, fullName: true, role: true, jobTitle: true, email: true, phone: true, active: true, hidden: true,
@@ -473,6 +473,32 @@ router.get('/onboarding-directory', requireAuth, requireRole('ADMIN', 'SUPER_ADM
     },
     orderBy: { fullName: 'asc' },
   });
+  // Channel Partners' actual onboarding data lives on the separate
+  // PartnerProfile model, not on User - none of the columns above apply
+  // to them. Fetch and merge it in here so their real data (bank
+  // details, PAN/Aadhar status, custom field answers) actually shows
+  // up, the same way Staff/Student's already does from their own User
+  // columns above.
+  const partnerIds = people.filter(p => p.role === 'CHANNEL_PARTNER').map(p => p.id);
+  if (partnerIds.length) {
+    const profiles = await prisma.partnerProfile.findMany({ where: { userId: { in: partnerIds } } });
+    const profileByUserId = Object.fromEntries(profiles.map(p => [p.userId, p]));
+    people = people.map(p => {
+      if (p.role !== 'CHANNEL_PARTNER') return p;
+      const profile = profileByUserId[p.id];
+      if (!profile) return p;
+      return {
+        ...p,
+        partnerFirstName: profile.firstName, partnerSurname: profile.surname,
+        partnerBankAccountHolderName: profile.bankAccountHolderName, partnerBankAccountNumber: profile.bankAccountNumber,
+        partnerBankIfscCode: profile.bankIfscCode, partnerBankName: profile.bankName,
+        partnerEmergencyContactName: profile.emergencyContactName, partnerEmergencyContactPhone: profile.emergencyContactPhone,
+        partnerEmergencyContactRelation: profile.emergencyContactRelation,
+        partnerPanCardStatus: profile.panCardStatus, partnerAadharCardStatus: profile.aadharCardStatus,
+        partnerCustomValues: profile.customValues,
+      };
+    });
+  }
   const customFields = await prisma.onboardingFieldDefinition.findMany({ where: { active: true }, orderBy: { sortOrder: 'asc' } });
   res.json({ people, customFields });
 });
