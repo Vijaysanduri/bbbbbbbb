@@ -335,6 +335,10 @@ model PartnerProfile {
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
   extraAttachments         PartnerProfileAttachment[]
+  // Same purpose as customOnboardingValues on User (for
+  // Employees/Students) - keyed by OnboardingFieldDefinition.id, for
+  // fields Admin adds specifically for Channel Partners.
+  customValues             Json?
 }
 
 // Admin can attach additional files to a partner's profile beyond the
@@ -692,7 +696,12 @@ model Task {
   // read-only. Enforced the same way referencePhone is: stripped
   // server-side for anyone who isn't Admin/Super Admin, not just hidden
   // in Employee's UI.
+  // LEGACY - kept read-only for historical entries recorded before the
+  // TaskConfidentialNote model below existed (as one continuously
+  // prepended text blob, not separate dated rows). Nothing new gets
+  // written here going forward - see confidentialNoteEntries instead.
   confidentialNotes String? @db.Text
+  confidentialNoteEntries TaskConfidentialNote[]
 
   // Reference contact — for when the channel partner who referred this
   // candidate isn't comfortable using their own portal login (e.g. not
@@ -765,6 +774,26 @@ model Task {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// One row per dated Confidential Note entry on a Task - Admin/Super
+// Admin only, same visibility rule as the legacy confidentialNotes
+// text field above. Each entry can optionally carry one attached
+// document (stored as base64, matching how other small attachments
+// like signable documents work elsewhere in this schema).
+model TaskConfidentialNote {
+  id                 String   @id @default(cuid())
+  taskId             String
+  task               Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId           String?
+  author             User?    @relation(fields: [authorId], references: [id])
+  text               String   @db.Text
+  attachmentFileName String?
+  attachmentMimeType String?
+  attachmentData     String?  @db.Text
+  createdAt          DateTime @default(now())
+
+  @@index([taskId])
 }
 
 // One comment model shared by leads and tasks (exactly one of leadId/taskId set).
@@ -1724,4 +1753,22 @@ model OnboardingFieldDefinition {
   createdById String?
   createdBy   User?    @relation(fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
+  // "STAFF" (the default) = Employees/Students, using customOnboardingValues
+  // on User - this is every field that existed before this column was
+  // added, so the default preserves their exact current behavior.
+  // "CHANNEL_PARTNER" = shows on the partner's own onboarding form
+  // instead, saved to PartnerProfile.customValues.
+  targetRole  String   @default("STAFF")
+}
+
+// Lets admin rename the DISPLAY LABEL of the built-in, fixed Onboarding
+// Form fields (Father's Name, Blood Group, etc.) - these are hardcoded
+// database columns on User (fatherName, bloodGroup...), unlike the
+// fully dynamic OnboardingFieldDefinition fields above, so this is
+// purely a display-label override, not a new field. fieldKey matches
+// the actual column name (e.g. "fatherName"); no row here for a given
+// key means "use the default label" everywhere it's shown.
+model OnboardingFieldLabel {
+  fieldKey String @id // e.g. "fatherName", "bloodGroup" - matches the actual User column name
+  label    String
 }
