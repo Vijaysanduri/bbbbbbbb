@@ -121,12 +121,15 @@ router.get('/partners', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async 
       conversionRate: referredCount ? Math.round((convertedCount / referredCount) * 100) : 0,
       commissionEarned, commissionPending,
       profileComplete: !!(profile && profile.submittedAt),
+      reminderCount: profile ? profile.reminderCount : 0,
+      lastReminderAt: profile ? profile.lastReminderAt : null,
       agreementStatus: agreement.status, agreementAt: agreement.at,
       // Full profile detail, for admin review/export — this endpoint is
       // already Admin/Super Admin only, so it's appropriate to include
       // bank details here rather than needing a second, separate call.
       profileFirstName: profile ? profile.firstName : null,
       profileSurname: profile ? profile.surname : null,
+      customValues: profile ? profile.customValues : null,
       bankAccountHolderName: profile ? profile.bankAccountHolderName : null,
       bankAccountNumber: profile ? profile.bankAccountNumber : null,
       bankIfscCode: profile ? profile.bankIfscCode : null,

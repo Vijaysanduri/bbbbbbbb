@@ -8,6 +8,7 @@ const { rateLimiter } = require('../middleware/rateLimiter');
 const { generatePartnerCertificatePdf } = require('../utils/partnerCertificatePdf');
 const { generatePartnerBusinessCardPdf } = require('../utils/partnerBusinessCardPdf');
 const { deliverPartnerAgreement } = require('../utils/partnerAgreementDelivery');
+const { logPartnerComment } = require('../utils/partnerCommentLog');
 const { sessionEffectiveEnd, sessionIsActuallyOpen } = require('../utils/sessionHelpers');
 const { buildMergeFieldValues, fillDocxTemplate, fillPlaceholders } = require('../utils/docTemplateUtils');
 
@@ -382,6 +383,26 @@ router.get('/employees/:id/business-card', requireAuth, requireRole('ADMIN', 'SU
   res.send(pdfBuffer);
 });
 
+// GET /api/auth/channel-partners/:id/agreement-status — Admin/Super
+// Admin only. Read-only check for whether an agreement already exists,
+// with no side effects - lets the UI show this proactively when the
+// Send Agreement modal opens, rather than only finding out after
+// attempting to send.
+router.get('/channel-partners/:id/agreement-status', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const existing = await prisma.signableDocument.findFirst({
+    where: { targetUserId: req.params.id, category: 'AGREEMENT' },
+    orderBy: { createdAt: 'desc' },
+    include: { acknowledgments: { where: { userId: req.params.id }, select: { signedAt: true, uploadedAt: true } } },
+  });
+  if (!existing) return res.json({ exists: false });
+  const ack = existing.acknowledgments[0];
+  res.json({
+    exists: true,
+    sentAt: existing.createdAt,
+    status: (ack && (ack.signedAt || ack.uploadedAt)) ? 'SIGNED' : 'PENDING',
+  });
+});
+
 // POST /api/auth/channel-partners/:id/generate-agreement — Admin/Super
 // Admin only. Auto-fills the agreement from the partner's real account
 // data (name, ID, email, phone, address) — Business Name is the one
@@ -391,9 +412,27 @@ router.get('/employees/:id/business-card', requireAuth, requireRole('ADMIN', 'SU
 // them — it just appears in their portal automatically, no upload step
 // needed for this or any future partner.
 router.post('/channel-partners/:id/generate-agreement', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
-  const { businessName, effectiveDate, responseDeadline } = req.body;
+  const { businessName, effectiveDate, responseDeadline, force } = req.body;
   try {
+    if (!force) {
+      const existing = await prisma.signableDocument.findFirst({
+        where: { targetUserId: req.params.id, category: 'AGREEMENT' },
+        orderBy: { createdAt: 'desc' },
+        include: { acknowledgments: { where: { userId: req.params.id }, select: { signedAt: true, uploadedAt: true } } },
+      });
+      if (existing) {
+        const ack = existing.acknowledgments[0];
+        return res.status(409).json({
+          error: 'An agreement was already sent to this partner.',
+          existingAgreement: {
+            sentAt: existing.createdAt,
+            status: (ack && (ack.signedAt || ack.uploadedAt)) ? 'SIGNED' : 'PENDING',
+          },
+        });
+      }
+    }
     const doc = await deliverPartnerAgreement(req.params.id, { businessName, effectiveDate, responseDeadline, createdById: req.user.id });
+    await logPartnerComment(req.params.id, force ? 'Agreement sent manually (additional copy, one already existed).' : 'Agreement sent manually by admin.', req.user.id);
     res.status(201).json({ documentId: doc.id });
   } catch (err) {
     res.status(err.message.includes('not found') ? 404 : 400).json({ error: err.message });

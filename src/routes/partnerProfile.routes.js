@@ -3,6 +3,7 @@ const { PrismaClient } = require('@prisma/client');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { deliverPartnerAgreement } = require('../utils/partnerAgreementDelivery');
 const { sendMail } = require('../utils/mailer');
+const { logPartnerComment } = require('../utils/partnerCommentLog');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -56,16 +57,51 @@ async function checkCompletionAndMaybeSendAgreement(profile) {
   });
 
   const updated = await prisma.partnerProfile.update({ where: { id: profile.id }, data: { submittedAt: new Date() } });
-  if (existingAgreement) return updated;
+  await logPartnerComment(profile.userId, 'Profile marked complete — all required fields and both documents submitted.');
+
+  // Confirmation emails - one to the partner confirming their submission
+  // went through, one notifying every active admin so they don't need
+  // to keep checking the Onboarding Form page to find out. Both fire
+  // exactly once, right alongside the agreement, guarded by the same
+  // submittedAt check above - can't double-send on a later profile edit.
+  const partnerUser = await prisma.user.findUnique({ where: { id: profile.userId }, select: { fullName: true, email: true } });
+  try {
+    await sendMail({
+      to: partnerUser.email,
+      subject: 'Your Channel Partner profile is complete',
+      body: `Hi ${partnerUser.fullName},\n\nYour profile is now complete — thank you for filling everything in. Your Channel Partner Agreement is on its way to your portal to review and sign.\n\nBest,\nDream2Fly Team`,
+    });
+  } catch (err) {
+    console.error('[partner-profile] Submission confirmation email to partner failed:', err.message);
+  }
+  try {
+    const admins = await prisma.user.findMany({ where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, active: true } });
+    for (const admin of admins) {
+      await sendMail({
+        to: admin.email,
+        subject: `Channel Partner profile completed — ${partnerUser.fullName}`,
+        body: `${partnerUser.fullName} has just completed their Channel Partner onboarding profile.\n\nView their full details from Admin -> Channel Partners -> View Profile.`,
+      });
+    }
+  } catch (err) {
+    console.error('[partner-profile] Submission notification email to admins failed:', err.message);
+  }
+
+  if (existingAgreement) {
+    await logPartnerComment(profile.userId, 'Agreement was already on file — not re-sent automatically.');
+    return updated;
+  }
 
   const displayName = `${profile.firstName} ${profile.surname}`.trim();
   try {
     await deliverPartnerAgreement(profile.userId, { displayName });
+    await logPartnerComment(profile.userId, 'Agreement automatically generated and sent to portal + email.');
   } catch (err) {
     // Profile completion itself still succeeded even if the agreement
     // send hit a problem — don't let a delivery failure make it look
     // like the partner's own submission failed.
     console.error('[partner-profile] Agreement auto-send failed after profile completion:', err.message);
+    await logPartnerComment(profile.userId, 'Agreement auto-send FAILED after profile completion: ' + err.message);
   }
   return updated;
 }
@@ -157,6 +193,12 @@ async function reviewPartnerDocument(req, res, docType, decision) {
   }
   const updated = await prisma.partnerProfile.update({ where: { id: profile.id }, data: updateData });
 
+  if (decision === 'APPROVED') {
+    await logPartnerComment(req.params.userId, `${DOC_LABELS[docType]} approved.`, req.user.id);
+  } else {
+    await logPartnerComment(req.params.userId, `${DOC_LABELS[docType]} rejected — reason: ${req.body.reason.trim()}`, req.user.id);
+  }
+
   if (decision === 'REJECTED') {
     const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
     if (user) {
@@ -184,6 +226,63 @@ router.post('/:userId/attachments', requireAuth, requireRole('ADMIN', 'SUPER_ADM
     data: { profileId: profile.id, fileName, mimeType: mimeType || 'application/octet-stream', fileData, uploadedById: req.user.id },
   });
   res.status(201).json(attachment);
+});
+
+// POST /api/partner-profile/:userId/send-reminder — Admin/Super Admin
+// only. Manually fires the same reminder a partner would otherwise only
+// get from the weekly scheduled check - for when you don't want to
+// wait for that cycle. Blocked if the profile is already complete,
+// since there'd be nothing left to remind them about.
+router.post('/:userId/send-reminder', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (!user || user.role !== 'CHANNEL_PARTNER') return res.status(404).json({ error: 'Partner account not found.' });
+  // getOrCreateProfile (not a plain findUnique) - a partner who's never
+  // opened their Onboarding Form yet has no PartnerProfile row at all,
+  // but is still a completely legitimate partner worth reminding, not
+  // an error case.
+  const profile = await getOrCreateProfile(req.params.userId);
+  if (profile.submittedAt) return res.status(400).json({ error: 'This profile is already complete — nothing to remind them about.' });
+  try {
+    await sendMail({
+      to: user.email,
+      subject: `Reminder: please complete your Channel Partner profile`,
+      body: `Hi ${user.fullName},\n\nYour profile still needs a few details before we can send your Channel Partner Agreement — please complete it from your portal.\n\nBest,\nDream2Fly Team`,
+    });
+  } catch (err) {
+    return res.status(502).json({ error: 'Could not send the reminder email: ' + err.message });
+  }
+  const updated = await prisma.partnerProfile.update({
+    where: { id: profile.id },
+    data: { reminderCount: { increment: 1 }, lastReminderAt: new Date() },
+  });
+  await logPartnerComment(req.params.userId, 'Reminder email sent manually.', req.user.id);
+  res.json({ reminderCount: updated.reminderCount, lastReminderAt: updated.lastReminderAt });
+});
+
+// GET /api/partner-profile/:userId/comments — Admin/Super Admin only.
+// The full activity thread for this partner - automated system entries
+// (agreements/certificates/reminders sent, documents approved/rejected)
+// mixed with any manual notes admin has added, newest first.
+router.get('/:userId/comments', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const comments = await prisma.comment.findMany({
+    where: { partnerId: req.params.userId },
+    include: { author: { select: { fullName: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(comments);
+});
+
+// POST /api/partner-profile/:userId/comments — Admin/Super Admin only.
+// Adds a manual note to the same thread - isSystem: false distinguishes
+// this from the automated entries logged elsewhere in this file.
+router.post('/:userId/comments', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const { text } = req.body;
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Please enter a note before saving.' });
+  const comment = await prisma.comment.create({
+    data: { partnerId: req.params.userId, text: text.trim(), isSystem: false, channel: 'INTERNAL', authorId: req.user.id },
+    include: { author: { select: { fullName: true } } },
+  });
+  res.status(201).json(comment);
 });
 
 module.exports = router;

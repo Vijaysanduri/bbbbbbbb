@@ -382,7 +382,7 @@ router.patch('/:id/priority', requireAuth, async (req, res) => {
 // PATCH /api/tasks/:id/status
 // Body: { status }
 router.patch('/:id/status', requireAuth, async (req, res) => {
-  let { status } = req.body;
+  let { status, notify } = req.body;
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
 
@@ -402,7 +402,11 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
   // candidate shouldn't ever receive an email saying "your status is
   // now: Duplicated," so this skips the customer email the same way
   // the AUTO revert above does.
-  const skipCandidateEmail = isAutoRevert || status === 'DUPLICATED';
+  // notify defaults to true (undefined !== false) so any existing
+  // caller that doesn't explicitly pass this keeps working exactly as
+  // it did before - only an explicit notify: false actually skips it,
+  // giving staff a genuine choice rather than a forced email.
+  const skipCandidateEmail = isAutoRevert || status === 'DUPLICATED' || notify === false;
 
   const updated = await prisma.task.update({ where: { id: task.id }, data: { status } });
   let mailResult = { delivered: false, skipped: true };
