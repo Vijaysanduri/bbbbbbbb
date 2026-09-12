@@ -429,6 +429,7 @@ model User {
   // every bit of their data and history fully intact. Reversible via a
   // "Show Hidden" toggle on each list.
   hidden       Boolean  @default(false)
+  partnerComments Comment[] @relation("PartnerComments")
   country      String?  // relevant for STUDENT role — which destination their checklist should show
   branchId     String?
   branch       Branch?  @relation(fields: [branchId], references: [id])
@@ -813,6 +814,11 @@ model Comment {
   lead      Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
   taskId    String?
   task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  // Extends this same comment/activity-log system to Channel Partners -
+  // named relation since authorId already relates to User, and Prisma
+  // needs an explicit name to tell the two apart.
+  partnerId String?
+  partner   User?    @relation("PartnerComments", fields: [partnerId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
 
   // Basic attachment support: stored as a data URL (base64) rather than
