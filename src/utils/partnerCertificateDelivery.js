@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const { generatePartnerCertificatePdf } = require('./partnerCertificatePdf');
 const { sendMail } = require('./mailer');
+const { logPartnerComment } = require('./partnerCommentLog');
 
 const prisma = new PrismaClient();
 
@@ -42,6 +43,7 @@ async function checkAndSendCertificateIfEligible(userId, documentCategory) {
     attachmentBase64: pdfBuffer.toString('base64'),
     attachmentMimeType: 'application/pdf',
   });
+  await logPartnerComment(userId, 'Certificate automatically generated and sent, after signing the Agreement.');
 }
 
 module.exports = { checkAndSendCertificateIfEligible };

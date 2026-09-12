@@ -3,6 +3,7 @@ const { sendMail, wrapPromotionEmailHtml } = require('./mailer');
 const { sendWhatsApp } = require('./whatsapp');
 const { createNotification } = require('./notifications');
 const { TOKEN_LIFETIME_MS, sessionEffectiveEnd } = require('./sessionHelpers');
+const { logPartnerComment } = require('./partnerCommentLog');
 
 const prisma = new PrismaClient();
 
@@ -87,6 +88,7 @@ async function sendPartnerProfileReminders() {
         where: { id: profile.id },
         data: { reminderCount: { increment: 1 }, lastReminderAt: new Date() },
       });
+      await logPartnerComment(profile.userId, 'Automated weekly reminder email sent (profile still incomplete).');
     } catch (err) {
       console.error('Scheduled partner profile reminder failed for', profile.user.email, err.message);
     }
