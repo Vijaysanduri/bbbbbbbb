@@ -311,6 +311,7 @@ router.get('/:id/overview', requireAuth, async (req, res) => {
       stage: task.stage, status: task.status, assignedEmployeeName: task.assignedEmployee ? task.assignedEmployee.fullName : null,
       course: task.course, college: task.college, fees: task.fees, applicationId: task.applicationId, intake: task.intake,
       caseType: task.caseType, studentLinked: !!task.studentId, studentEmail: task.student ? task.student.email : null,
+      customFields: task.customFields || {},
     },
     loan: {
       bankName: task.loanBankName, status: task.loanStatus, officialName: task.loanOfficialName,
@@ -516,7 +517,7 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
 // reads this first to know where things stand right now, without having
 // to scroll the whole comment thread.
 router.patch('/:id/overview', requireAuth, async (req, res) => {
-  const { overview, course, college, fees, applicationId, intake } = req.body;
+  const { overview, course, college, fees, applicationId, intake, customFields } = req.body;
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({
@@ -528,6 +529,11 @@ router.patch('/:id/overview', requireAuth, async (req, res) => {
       ...(applicationId !== undefined ? { applicationId } : {}),
       ...(intake !== undefined ? { intake } : {}),
       ...(fees !== undefined ? { fees } : {}),
+      // Admin-added custom fields (see CustomFields note on the Task
+      // model) - merged with whatever's already saved rather than
+      // replacing wholesale, so saving one custom field doesn't wipe
+      // out others that weren't part of this particular request.
+      ...(customFields !== undefined ? { customFields: { ...(task.customFields || {}), ...customFields } } : {}),
     },
   });
   await logActivity(`${task.related} — overview updated.`, req.user.id);
@@ -729,8 +735,13 @@ router.get('/:id/confidential-notes/export', requireAuth, requireRole('ADMIN', '
 // rest of a task's basic case details (course, college, etc.).
 router.patch('/:id/case-type', requireAuth, async (req, res) => {
   const { caseType } = req.body;
-  if (caseType && !['Work Visa', 'Student Visa'].includes(caseType)) {
-    return res.status(400).json({ error: 'caseType must be either "Work Visa" or "Student Visa".' });
+  if (caseType) {
+    // Checked against the table itself, not active:true specifically -
+    // same reasoning as Stage: a task legitimately already sitting on a
+    // since-retired case type shouldn't become impossible to re-save if
+    // nothing else about it changed.
+    const validCaseType = await prisma.caseTypeOption.findUnique({ where: { name: caseType } });
+    if (!validCaseType) return res.status(400).json({ error: `"${caseType}" isn't a recognized case type. Add it first under Manage Case Types if it's meant to be new.` });
   }
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });

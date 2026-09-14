@@ -5,12 +5,12 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// GET /api/onboarding-fields?targetRole=STAFF|CHANNEL_PARTNER — any
+// GET /api/onboarding-fields?targetRole=STAFF|CHANNEL_PARTNER|TASK — any
 // signed-in user. Defaults to STAFF (Employees/Students) if not
 // specified, matching every existing caller's current behavior exactly
 // - none of them need to change to keep working as before.
 router.get('/', requireAuth, async (req, res) => {
-  const targetRole = req.query.targetRole === 'CHANNEL_PARTNER' ? 'CHANNEL_PARTNER' : 'STAFF';
+  const targetRole = ['CHANNEL_PARTNER', 'TASK'].includes(req.query.targetRole) ? req.query.targetRole : 'STAFF';
   const fields = await prisma.onboardingFieldDefinition.findMany({
     where: { active: true, targetRole },
     orderBy: { sortOrder: 'asc' },
@@ -22,7 +22,7 @@ router.get('/', requireAuth, async (req, res) => {
 router.post('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const { label, fieldType, targetRole } = req.body;
   if (!label) return res.status(400).json({ error: 'label is required.' });
-  const resolvedRole = targetRole === 'CHANNEL_PARTNER' ? 'CHANNEL_PARTNER' : 'STAFF';
+  const resolvedRole = ['CHANNEL_PARTNER', 'TASK'].includes(targetRole) ? targetRole : 'STAFF';
   const maxOrder = await prisma.onboardingFieldDefinition.aggregate({ where: { targetRole: resolvedRole }, _max: { sortOrder: true } });
   const field = await prisma.onboardingFieldDefinition.create({
     data: {
