@@ -83,6 +83,52 @@ model TaskStageOption {
   createdAt DateTime @default(now())
 }
 
+// Admin-manageable country list — same reasoning as TaskStageOption
+// above. Lead.country and Task.country are plain strings matching one
+// of these `name` values, so Admin can add/retire a country themselves
+// without a code deploy.
+model CountryOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+// Admin-manageable service list (e.g. "Student Visa") - same reasoning
+// as CountryOption above. Lead.service is a plain string matching one
+// of these `name` values. Deliberately NOT extended to Lead.source,
+// which stays a fixed LeadSource enum by choice.
+model ServiceOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+// Admin-manageable case type list (e.g. "Student Visa") - same
+// reasoning as ServiceOption above. Task.caseType is a plain string
+// matching one of these `name` values.
+model CaseTypeOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+// Admin-manageable loan status list (e.g. "Applied", "Approved") - same
+// reasoning as CaseTypeOption above. Task.loanStatus is a plain string
+// matching one of these `name` values.
+model LoanStatusOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
 enum LeadSource {
   WEBSITE
   COLLEGE
@@ -645,6 +691,13 @@ model Task {
   // Same purpose as Lead.hidden - reversible list decluttering,
   // separate from status (e.g. CANCELLED), which records an outcome.
   hidden   Boolean    @default(false)
+  // Admin-defined custom fields (OnboardingFieldDefinition with
+  // targetRole: "TASK") - keyed by field id, same pattern as
+  // customOnboardingValues on User and customValues on PartnerProfile.
+  // Existing task fields (course, college, applicationId, etc.) are
+  // untouched - this is strictly additive, for fields admin adds
+  // without needing a code deploy.
+  customFields Json?
   due      DateTime
   priority Priority   @default(MEDIUM)
   status   TaskStatus @default(PENDING)
