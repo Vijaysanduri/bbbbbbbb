@@ -10,12 +10,17 @@ const prisma = new PrismaClient();
 // specified, matching every existing caller's current behavior exactly
 // - none of them need to change to keep working as before.
 router.get('/', requireAuth, async (req, res) => {
-  const targetRole = ['CHANNEL_PARTNER', 'TASK'].includes(req.query.targetRole) ? req.query.targetRole : 'STAFF';
-  const fields = await prisma.onboardingFieldDefinition.findMany({
-    where: { active: true, targetRole },
-    orderBy: { sortOrder: 'asc' },
-  });
-  res.json(fields);
+  try {
+    const targetRole = ['CHANNEL_PARTNER', 'TASK'].includes(req.query.targetRole) ? req.query.targetRole : 'STAFF';
+    const fields = await prisma.onboardingFieldDefinition.findMany({
+      where: { active: true, targetRole },
+      orderBy: { sortOrder: 'asc' },
+    });
+    res.json(fields);
+  } catch (err) {
+    console.error('[onboarding-fields] GET failed:', err);
+    res.status(500).json({ error: 'Could not load onboarding fields: ' + err.message });
+  }
 });
 
 // POST /api/onboarding-fields — Admin/Super Admin only.
