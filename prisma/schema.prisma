@@ -476,6 +476,7 @@ model User {
   // "Show Hidden" toggle on each list.
   hidden       Boolean  @default(false)
   partnerComments Comment[] @relation("PartnerComments")
+  taskConfidentialNotes TaskConfidentialNote[]
   country      String?  // relevant for STUDENT role — which destination their checklist should show
   branchId     String?
   branch       Branch?  @relation(fields: [branchId], references: [id])
