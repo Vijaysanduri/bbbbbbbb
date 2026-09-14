@@ -5,6 +5,17 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 const prisma = new PrismaClient();
 
+// GET /api/services/public — no auth. For the public website's own
+// registration form, same reasoning as countries.routes.js.
+router.get('/public', async (req, res) => {
+  const services = await prisma.serviceOption.findMany({
+    where: { active: true },
+    orderBy: { order: 'asc' },
+    select: { name: true },
+  });
+  res.json(services);
+});
+
 // GET /api/services — any authenticated user (needed for the Lead
 // dropdowns). ?includeInactive=1 for the Manage Services admin screen
 // only - everywhere else should only ever see active ones.

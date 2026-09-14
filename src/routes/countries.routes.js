@@ -5,6 +5,20 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const router = express.Router();
 const prisma = new PrismaClient();
 
+// GET /api/countries/public — no auth. For the public website's own
+// registration form (dream2fly.co.uk) - same /public naming
+// convention already used for leads and career applications. Only
+// ever returns active ones; never includeInactive here, since a
+// public visitor should never see a retired option.
+router.get('/public', async (req, res) => {
+  const countries = await prisma.countryOption.findMany({
+    where: { active: true },
+    orderBy: { order: 'asc' },
+    select: { name: true },
+  });
+  res.json(countries);
+});
+
 // GET /api/countries — any authenticated user (needed for dropdowns
 // across Admin, Employee, and Partner). ?includeInactive=1 for the
 // Manage Countries admin screen only - everywhere else should only
