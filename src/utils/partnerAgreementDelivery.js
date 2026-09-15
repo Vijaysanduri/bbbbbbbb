@@ -46,14 +46,21 @@ async function deliverPartnerAgreement(partnerId, { businessName, effectiveDate,
     },
   });
   await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: partner.id } });
-  await sendMail({
-    to: partner.email,
-    subject: `Action needed: ${doc.title}`,
-    body: `Hi ${name},\n\nYour Channel Partner Agreement is attached, and also ready for review and signature from your portal.\n\nBest,\nDream2Fly Team`,
-    attachmentFileName: fileName,
-    attachmentBase64: pdfBuffer.toString('base64'),
-    attachmentMimeType: 'application/pdf',
-  });
+  try {
+    await sendMail({
+      to: partner.email,
+      subject: `Action needed: ${doc.title}`,
+      body: `Hi ${name},\n\nYour Channel Partner Agreement is attached, and also ready for review and signature from your portal.\n\nBest,\nDream2Fly Team`,
+      attachmentFileName: fileName,
+      attachmentBase64: pdfBuffer.toString('base64'),
+      attachmentMimeType: 'application/pdf',
+    });
+  } catch (err) {
+    // The document itself and its portal entry already exist by this
+    // point - a failed email just means the partner didn't get a copy
+    // in their inbox, not that the agreement wasn't actually delivered.
+    console.error(`[partner-agreement] Email failed for partner ${partner.id}:`, err.message);
+  }
 
   return doc;
 }

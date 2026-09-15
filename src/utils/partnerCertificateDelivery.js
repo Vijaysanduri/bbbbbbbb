@@ -35,15 +35,25 @@ async function checkAndSendCertificateIfEligible(userId, documentCategory) {
 
   await prisma.partnerProfile.update({ where: { id: profile.id }, data: { certificateSentAt: new Date() } });
 
-  await sendMail({
-    to: user.email,
-    subject: 'Your Dream2Fly Channel Partner Certificate',
-    body: `Hi ${displayName},\n\nCongratulations — your profile and Channel Partner Agreement are both complete. Your official Certificate is attached.\n\nWelcome aboard.\n\nBest,\nDream2Fly Team`,
-    attachmentFileName: `Dream2Fly-Partner-Certificate-${displayName.replace(/\s+/g, '-')}.pdf`,
-    attachmentBase64: pdfBuffer.toString('base64'),
-    attachmentMimeType: 'application/pdf',
-  });
-  await logPartnerComment(userId, 'Certificate automatically generated and sent, after signing the Agreement.');
+  try {
+    await sendMail({
+      to: user.email,
+      subject: 'Your Dream2Fly Channel Partner Certificate',
+      body: `Hi ${displayName},\n\nCongratulations — your profile and Channel Partner Agreement are both complete. Your official Certificate is attached.\n\nWelcome aboard.\n\nBest,\nDream2Fly Team`,
+      attachmentFileName: `Dream2Fly-Partner-Certificate-${displayName.replace(/\s+/g, '-')}.pdf`,
+      attachmentBase64: pdfBuffer.toString('base64'),
+      attachmentMimeType: 'application/pdf',
+    });
+    await logPartnerComment(userId, 'Certificate automatically generated and sent, after signing the Agreement.');
+  } catch (err) {
+    // certificateSentAt is already set above (by design, to prevent a
+    // duplicate generation attempt on a later sign/upload) - so a
+    // failure here is a genuine limitation: the partner won't get an
+    // automatic retry. Logged clearly so this is visible, rather than
+    // crashing whatever document sign/upload actually triggered this.
+    console.error(`[partner-certificate] Email failed for partner ${userId} - certificate marked sent but was not delivered:`, err.message);
+    await logPartnerComment(userId, 'Certificate generation FAILED to send by email: ' + err.message);
+  }
 }
 
 module.exports = { checkAndSendCertificateIfEligible };
