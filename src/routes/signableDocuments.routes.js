@@ -88,11 +88,15 @@ router.post('/:id/acks/:userId/reject', requireAuth, requireRole('ADMIN', 'SUPER
   ]);
   const person = await prisma.user.findUnique({ where: { id: req.params.userId } });
   if (person) {
-    await sendMail({
-      to: person.email,
-      subject: `Action needed: "${doc.title}" needs to be resubmitted`,
-      body: `Hi ${person.fullName},\n\nYour submission for "${doc.title}" needs another look before it can be accepted:\n\n"${reason}"\n\nPlease sign or upload it again from your portal.\n\nBest,\nDream2Fly`,
-    });
+    try {
+      await sendMail({
+        to: person.email,
+        subject: `Action needed: "${doc.title}" needs to be resubmitted`,
+        body: `Hi ${person.fullName},\n\nYour submission for "${doc.title}" needs another look before it can be accepted:\n\n"${reason}"\n\nPlease sign or upload it again from your portal.\n\nBest,\nDream2Fly`,
+      });
+    } catch (err) {
+      console.error(`[signable-documents] Rejection email failed for ${person.email}:`, err.message);
+    }
   }
   await logActivity(`${req.user.fullName} rejected ${person ? person.fullName : 'a submission'}'s "${doc.title}" — asked to resubmit.`, req.user.id);
   res.json(ack);
@@ -143,11 +147,15 @@ router.post('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (
   }
   for (const person of recipients) {
     await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: person.id } });
-    await sendMail({
-      to: person.email,
-      subject: `Action needed: ${doc.title}`,
-      body: `Hi ${person.fullName},\n\nA new ${category === 'AGREEMENT' ? 'agreement' : 'document'} "${doc.title}" needs your signature. Please review and sign it from your portal.\n\nBest,\nDream2Fly HR`,
-    });
+    try {
+      await sendMail({
+        to: person.email,
+        subject: `Action needed: ${doc.title}`,
+        body: `Hi ${person.fullName},\n\nA new ${category === 'AGREEMENT' ? 'agreement' : 'document'} "${doc.title}" needs your signature. Please review and sign it from your portal.\n\nBest,\nDream2Fly HR`,
+      });
+    } catch (err) {
+      console.error(`[signable-documents] Distribution email failed for ${person.email}:`, err.message);
+    }
   }
   res.status(201).json(doc);
 });
@@ -236,11 +244,16 @@ router.post('/:id/remind/:userId', requireAuth, requireRole('ADMIN', 'SUPER_ADMI
     include: { user: true },
   });
   if (!doc || !ack) return res.status(404).json({ error: 'Not found.' });
-  await sendMail({
-    to: ack.user.email,
-    subject: `Reminder: please sign "${doc.title}"`,
-    body: `Hi ${ack.user.fullName},\n\nThis is a reminder that "${doc.title}" is still awaiting your signature. Please complete it from your employee portal.\n\nBest,\nDream2Fly HR`,
-  });
+  try {
+    await sendMail({
+      to: ack.user.email,
+      subject: `Reminder: please sign "${doc.title}"`,
+      body: `Hi ${ack.user.fullName},\n\nThis is a reminder that "${doc.title}" is still awaiting your signature. Please complete it from your employee portal.\n\nBest,\nDream2Fly HR`,
+    });
+  } catch (err) {
+    console.error(`[signable-documents] Reminder email failed for ${ack.user.email}:`, err.message);
+    return res.status(502).json({ error: 'Could not send the reminder email: ' + err.message });
+  }
   const updated = await prisma.signableDocumentAck.update({
     where: { id: ack.id },
     data: { remindersSentCount: { increment: 1 }, lastReminderAt: new Date() },

@@ -304,14 +304,23 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     }
   });
 
-  const email = renderTemplate(status, lead.name);
-  // In production, fetch the candidate's real email address from the
-  // applicant record and pass it as `to`. Placeholder shown here since
-  // the prototype doesn't yet store candidate contact emails.
-  const mailResult = await sendMail({ to: `${lead.name.replace(/\s+/g, '.').toLowerCase()}@example.com`, subject: email.subject, body: email.body });
+  // Lead.contactEmail is a real stored field now - no more placeholder
+  // "name@example.com" construction, which real mail providers reject.
+  // A failed or skipped email should never undo the status change
+  // above, which already succeeded.
+  let mailResult = { delivered: false, skipped: true };
+  if (lead.contactEmail) {
+    try {
+      const email = renderTemplate(status, lead.name);
+      mailResult = await sendMail({ to: lead.contactEmail, subject: email.subject, body: email.body });
+    } catch (err) {
+      console.error(`[leads] Status-change email failed for lead ${lead.id}:`, err.message);
+      mailResult = { delivered: false, skipped: false, error: err.message };
+    }
+  }
 
   await prisma.comment.create({
-    data: { leadId: lead.id, isSystem: true, authorId: req.user.id, text: `Status changed to "${status}" — email ${mailResult.delivered ? 'sent' : 'logged'} to ${lead.name}.` }
+    data: { leadId: lead.id, isSystem: true, authorId: req.user.id, text: `Status changed to "${status}"` + (lead.contactEmail ? ` — email ${mailResult.delivered ? 'sent' : 'logged'} to ${lead.name}.` : ' — no email on file, nothing sent.') }
   });
   await logActivity(`${lead.name} — status changed to "${status}".`, req.user.id);
   notifyRecordWatchers({
@@ -373,12 +382,22 @@ router.post('/:id/notify-candidate', requireAuth, async (req, res) => {
 
   if (via === 'email' || via === 'both') {
     if (!lead.contactEmail) return res.status(400).json({ error: 'No email address on file for this candidate yet — add one first.' });
-    mailResult = await sendMail({ to: lead.contactEmail, subject, body });
+    try {
+      mailResult = await sendMail({ to: lead.contactEmail, subject, body });
+    } catch (err) {
+      console.error(`[leads] notify-candidate email failed for lead ${lead.id}:`, err.message);
+      mailResult = { delivered: false, skipped: false, error: err.message };
+    }
   }
   if (via === 'whatsapp' || via === 'both') {
     const number = lead.whatsappNumber || lead.contactPhone;
     if (!number) return res.status(400).json({ error: 'No phone number on file for this candidate yet — add one first.' });
-    whatsAppResult = await sendWhatsApp({ to: number, message: subject + '\n\n' + body });
+    try {
+      whatsAppResult = await sendWhatsApp({ to: number, message: subject + '\n\n' + body });
+    } catch (err) {
+      console.error(`[leads] notify-candidate WhatsApp failed for lead ${lead.id}:`, err.message);
+      whatsAppResult = { delivered: false, skipped: false, error: err.message };
+    }
   }
 
   await prisma.comment.create({
@@ -413,6 +432,9 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
       body: text,
       attachmentFileName: attachmentName || undefined,
       attachmentBase64: attachmentUrl || undefined,
+    }).catch(err => {
+      console.error(`[leads] Comment email failed for lead ${lead.id}:`, err.message);
+      return { delivered: false, skipped: false, error: err.message };
     });
   }
 
@@ -526,11 +548,15 @@ router.patch('/:id', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MANAGER')
   if (isReassigningToSomeone) {
     const employee = await prisma.user.findUnique({ where: { id: assignedEmployeeId } });
     if (employee) {
-      await sendMail({
-        to: employee.email,
-        subject: `Lead assigned to you: ${updated.name}`,
-        body: `Hi ${employee.fullName},\n\n"${updated.name}" (${updated.country}, ${updated.service}) has been assigned to you. Please reach out as soon as possible — this is tracked against a 30-minute first-contact target.\n\nBest,\nDream2Fly`,
-      });
+      try {
+        await sendMail({
+          to: employee.email,
+          subject: `Lead assigned to you: ${updated.name}`,
+          body: `Hi ${employee.fullName},\n\n"${updated.name}" (${updated.country}, ${updated.service}) has been assigned to you. Please reach out as soon as possible — this is tracked against a 30-minute first-contact target.\n\nBest,\nDream2Fly`,
+        });
+      } catch (err) {
+        console.error(`[leads] Reassignment notification email failed for lead ${updated.id}:`, err.message);
+      }
       await createNotification(employee.id, 'New lead assigned', `"${updated.name}" (${updated.country}, ${updated.service}) has been assigned to you.`, 'LEAD_ASSIGNED', 'applicants');
     }
   }

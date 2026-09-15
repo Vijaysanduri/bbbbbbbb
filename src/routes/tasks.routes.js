@@ -49,11 +49,15 @@ async function notifyInternalTeam(task, changeDescription, actorName) {
   for (const person of recipients) {
     if (seen.has(person.email)) continue;
     seen.add(person.email);
-    await sendMail({
-      to: person.email,
-      subject: `[Internal] ${task.title} — ${changeDescription}`,
-      body: `Hi ${person.fullName},\n\n${actorName} just updated "${task.title}" (related to ${task.related}):\n\n${changeDescription}\n\nThis is an internal notification — the candidate has been notified separately only if that was explicitly selected.\n\n— Dream2Fly System`,
-    });
+    try {
+      await sendMail({
+        to: person.email,
+        subject: `[Internal] ${task.title} — ${changeDescription}`,
+        body: `Hi ${person.fullName},\n\n${actorName} just updated "${task.title}" (related to ${task.related}):\n\n${changeDescription}\n\nThis is an internal notification — the candidate has been notified separately only if that was explicitly selected.\n\n— Dream2Fly System`,
+      });
+    } catch (err) {
+      console.error(`[tasks] Internal notification email failed for ${person.email}:`, err.message);
+    }
   }
 }
 
@@ -411,13 +415,31 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
 
   const updated = await prisma.task.update({ where: { id: task.id }, data: { status } });
   let mailResult = { delivered: false, skipped: true };
-  if (!skipCandidateEmail) {
-    const email = renderTemplate(status, task.related);
-    mailResult = await sendMail({ to: `${task.related.replace(/\s+/g, '.').toLowerCase()}@example.com`, subject: email.subject, body: email.body });
+  // Only actually attempts an email if the task has a real contact
+  // email on file - there's no fake "name@example.com" fallback
+  // anymore, since that's not a real address and email providers
+  // correctly reject it. A missing email just means no notification
+  // goes out, same as if notify was explicitly false.
+  if (!skipCandidateEmail && task.contactEmail) {
+    try {
+      const email = renderTemplate(status, task.related);
+      mailResult = await sendMail({ to: task.contactEmail, subject: email.subject, body: email.body });
+    } catch (err) {
+      // The status change itself already succeeded above - a mail
+      // provider rejection or outage should never undo that or block
+      // the response. Just record that the email didn't go out.
+      console.error(`[tasks] Status-change email failed for task ${task.id}:`, err.message);
+      mailResult = { delivered: false, skipped: false, error: err.message };
+    }
   }
 
+  const emailNote = !task.contactEmail && !skipCandidateEmail
+    ? ' — no email on file, nothing sent.'
+    : (skipCandidateEmail
+        ? (isAutoRevert ? ' (reverted to automatic, following Stage — no candidate email sent).' : ' — marked as an internal duplicate, no candidate email sent.')
+        : ` — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.`);
   await prisma.comment.create({
-    data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}"` + (skipCandidateEmail ? (isAutoRevert ? ' (reverted to automatic, following Stage — no candidate email sent).' : ' — marked as an internal duplicate, no candidate email sent.') : ` — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.`) }
+    data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}"` + emailNote }
   });
   await prisma.taskHistoryEntry.create({ data: { taskId: task.id, action: `Status changed to "${status}"`, actorId: req.user.id } });
   await logActivity(`${task.related} — task "${task.title}" status changed to "${status}".`, req.user.id);
@@ -480,14 +502,24 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
       if (!task.contactEmail) {
         candidateMailResult = { delivered: false, skipped: true, reason: 'No email on file for this candidate.' };
       } else {
-        candidateMailResult = await sendMail({ to: task.contactEmail, subject: email.subject, body: email.body });
+        try {
+          candidateMailResult = await sendMail({ to: task.contactEmail, subject: email.subject, body: email.body });
+        } catch (err) {
+          console.error(`[tasks] Stage-change email failed for task ${task.id}:`, err.message);
+          candidateMailResult = { delivered: false, skipped: false, error: err.message };
+        }
       }
     }
     if (via === 'whatsapp' || via === 'both') {
       if (!task.contactPhone) {
         candidateWhatsAppResult = { delivered: false, skipped: true, reason: 'No phone on file for this candidate.' };
       } else {
-        candidateWhatsAppResult = await sendWhatsApp({ to: task.contactPhone, message: email.subject + '\n\n' + email.body });
+        try {
+          candidateWhatsAppResult = await sendWhatsApp({ to: task.contactPhone, message: email.subject + '\n\n' + email.body });
+        } catch (err) {
+          console.error(`[tasks] Stage-change WhatsApp failed for task ${task.id}:`, err.message);
+          candidateWhatsAppResult = { delivered: false, skipped: false, error: err.message };
+        }
       }
     }
   }
@@ -859,20 +891,25 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
     if (!task.contactEmail) {
       return res.status(400).json({ error: 'Comment saved, but no email on file for this candidate — add one in Contact details to actually send it.', comment });
     }
-    mailResult = await sendMail({
-      to: task.contactEmail,
-      subject: applicationUpdateFields ? `Application Update — ${task.related}` : `Message from Dream2Fly regarding ${task.related}`,
-      body: text,
-      attachmentFileName: attachmentName || undefined,
-      attachmentBase64: attachmentUrl || undefined,
-      // When the Application Update Format was used, applicationUpdateFields
-      // carries the structured rows — render those as a real styled table
-      // instead of letting the generic template escape the whole thing as
-      // plain-text paragraphs, which is all it can do with an ordinary message.
-      customHtml: applicationUpdateFields
-        ? wrapApplicationUpdateEmailHtml(`Application Update — ${task.related}`, applicationUpdateFields, applicationUpdateCommentTitle, applicationUpdateCommentBody)
-        : undefined,
-    });
+    try {
+      mailResult = await sendMail({
+        to: task.contactEmail,
+        subject: applicationUpdateFields ? `Application Update — ${task.related}` : `Message from Dream2Fly regarding ${task.related}`,
+        body: text,
+        attachmentFileName: attachmentName || undefined,
+        attachmentBase64: attachmentUrl || undefined,
+        // When the Application Update Format was used, applicationUpdateFields
+        // carries the structured rows — render those as a real styled table
+        // instead of letting the generic template escape the whole thing as
+        // plain-text paragraphs, which is all it can do with an ordinary message.
+        customHtml: applicationUpdateFields
+          ? wrapApplicationUpdateEmailHtml(`Application Update — ${task.related}`, applicationUpdateFields, applicationUpdateCommentTitle, applicationUpdateCommentBody)
+          : undefined,
+      });
+    } catch (err) {
+      console.error(`[tasks] Comment email failed for task ${task.id}:`, err.message);
+      mailResult = { delivered: false, skipped: false, error: err.message };
+    }
   }
 
   await logActivity(`${task.related} — ${text}`, req.user.id);
@@ -916,11 +953,21 @@ router.post('/:id/notify-candidate', requireAuth, async (req, res) => {
 
   if (via === 'email' || via === 'both') {
     if (!task.contactEmail) return res.status(400).json({ error: 'No email address on file for this candidate yet — add one first.' });
-    mailResult = await sendMail({ to: task.contactEmail, subject, body });
+    try {
+      mailResult = await sendMail({ to: task.contactEmail, subject, body });
+    } catch (err) {
+      console.error(`[tasks] notify-candidate email failed for task ${task.id}:`, err.message);
+      mailResult = { delivered: false, skipped: false, error: err.message };
+    }
   }
   if (via === 'whatsapp' || via === 'both') {
     if (!task.contactPhone) return res.status(400).json({ error: 'No phone number on file for this candidate yet — add one first.' });
-    whatsAppResult = await sendWhatsApp({ to: task.contactPhone, message: subject + '\n\n' + body });
+    try {
+      whatsAppResult = await sendWhatsApp({ to: task.contactPhone, message: subject + '\n\n' + body });
+    } catch (err) {
+      console.error(`[tasks] notify-candidate WhatsApp failed for task ${task.id}:`, err.message);
+      whatsAppResult = { delivered: false, skipped: false, error: err.message };
+    }
   }
 
   await prisma.comment.create({
@@ -947,11 +994,15 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
   if (assignedEmployeeId) {
     employee = await prisma.user.findUnique({ where: { id: assignedEmployeeId } });
     if (employee) {
-      await sendMail({
-        to: employee.email,
-        subject: `Task assigned to you: ${updated.related}`,
-        body: `Hi ${employee.fullName},\n\n"${updated.related}" has been assigned to you. Please review and follow up.\n\nBest,\nDream2Fly`,
-      });
+      try {
+        await sendMail({
+          to: employee.email,
+          subject: `Task assigned to you: ${updated.related}`,
+          body: `Hi ${employee.fullName},\n\n"${updated.related}" has been assigned to you. Please review and follow up.\n\nBest,\nDream2Fly`,
+        });
+      } catch (err) {
+        console.error(`[tasks] Assignment notification email failed for task ${updated.id}:`, err.message);
+      }
       await createNotification(employee.id, 'New task assigned', `"${updated.related}" has been assigned to you.`, 'TASK_ASSIGNED', 'tasks');
     }
   }
