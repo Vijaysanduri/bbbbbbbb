@@ -1039,6 +1039,7 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
 
   let student = await prisma.user.findUnique({ where: { email: studentEmail } });
   let createdNewAccount = false;
+  let reactivatedAccount = false;
   let plainPassword = null;
 
   if (student && student.role !== 'STUDENT') {
@@ -1052,20 +1053,32 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
       data: { fullName: task.related, email: studentEmail, passwordHash, role: 'STUDENT', phone: task.contactPhone || null },
     });
     createdNewAccount = true;
+  } else if (!student.active) {
+    // A disabled student's account being re-linked to a task clearly
+    // means they're active again - without this, the account stayed
+    // silently disabled forever, blocking login and password reset
+    // even though staff believed they'd re-registered the student.
+    // They likely don't remember whatever password they had before
+    // being disabled, so this generates a fresh one and notifies them,
+    // the same way a genuinely new account would.
+    plainPassword = password && password.length >= 8 ? password : Math.random().toString(36).slice(-10) + 'A1!';
+    const passwordHash = await bcrypt.hash(plainPassword, 10);
+    student = await prisma.user.update({ where: { id: student.id }, data: { active: true, passwordHash } });
+    reactivatedAccount = true;
   }
 
   const updated = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: student.id } });
-  await logActivity(`${task.related} linked to student portal account (${studentEmail})${createdNewAccount ? ' — new account created' : ''}.`, req.user.id);
+  await logActivity(`${task.related} linked to student portal account (${studentEmail})${createdNewAccount ? ' — new account created' : reactivatedAccount ? ' — previously-disabled account reactivated' : ''}.`, req.user.id);
 
-  if (createdNewAccount) {
+  if (createdNewAccount || reactivatedAccount) {
     sendMail({
       to: studentEmail,
-      subject: `Your Dream2Fly student portal is ready`,
-      body: `Hi ${task.related},\n\nYour Dream2Fly student portal has been set up — you can now track your application, message your counsellor, and manage documents online.\n\nPortal: https://dream2fly.co.uk/login.html\nEmail: ${studentEmail}\nPassword: ${plainPassword}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
+      subject: reactivatedAccount ? `Your Dream2Fly student portal is active again` : `Your Dream2Fly student portal is ready`,
+      body: `Hi ${task.related},\n\nYour Dream2Fly student portal ${reactivatedAccount ? 'has been reactivated' : 'has been set up'} — you can now track your application, message your counsellor, and manage documents online.\n\nPortal: https://dream2fly.co.uk/login.html\nEmail: ${studentEmail}\nPassword: ${plainPassword}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
     }).catch(err => console.error('[link-student] Welcome email failed:', err.message));
   }
 
-  res.json({ task: updated, createdNewAccount });
+  res.json({ task: updated, createdNewAccount, reactivatedAccount });
 });
 
 // PATCH /api/tasks/:id/unlink-student — clears the link only. Never

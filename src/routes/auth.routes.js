@@ -303,7 +303,15 @@ router.post('/forgot-password', forgotPasswordRateLimit, async (req, res) => {
       to: user.email,
       subject: `Your Dream2Fly password has been reset`,
       body: `Hi ${user.fullName},\n\nYou (or someone using your email) requested a password reset. Here's your new password:\n\n${newPassword}\n\nPlease sign in and change it to something memorable as soon as you can.\n\nIf you didn't request this, contact your admin right away.\n\nBest,\nDream2Fly`,
-    }).catch(err => console.error('[forgot-password] Email failed:', err.message));
+    }).catch(err => {
+      console.error('[forgot-password] Email failed:', err.message);
+      // Also logged where Admin can actually see it (Error Logs page),
+      // not just Railway's raw console - this endpoint always responds
+      // success to the caller by design (see the comment above), so
+      // this is otherwise invisible when a real send failure happens.
+      const { logError } = require('../utils/errorLogger');
+      logError(err, req).catch(() => {});
+    });
   }
   res.json({ success: true, message: genericMessage });
 });
@@ -877,7 +885,11 @@ router.patch('/employees/:id/reset-password', requireAuth, async (req, res) => {
     to: target.email,
     subject: `Your Dream2Fly password has been reset`,
     body: `Hi ${target.fullName},\n\nYour password was reset by ${req.user.fullName}. Here's your new password:\n\n${finalPassword}\n\nPlease sign in and change it to something memorable as soon as you can.\n\nPortal: https://www.dream2fly.co.uk/login.html\n\nIf this wasn't expected, contact your admin right away.\n\nBest,\nDream2Fly`,
-  }).catch(err => console.error('[reset-password] Email failed:', err.message));
+  }).catch(err => {
+    console.error('[reset-password] Email failed:', err.message);
+    const { logError } = require('../utils/errorLogger');
+    logError(err, req).catch(() => {});
+  });
   res.json({ success: true, newPassword: finalPassword });
 });
 
