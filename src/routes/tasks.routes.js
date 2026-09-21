@@ -35,6 +35,20 @@ async function logActivity(text, actorId) {
   await prisma.activityLog.create({ data: { text, actorId } });
 }
 
+// Every edit made to a task should show up in that task's own comment
+// history — not just the global Activity Log (which is a site-wide feed
+// most staff never open) — so anyone who opens the task can see what
+// changed, when, and by whom, right alongside the regular comments.
+// isSystem:true marks these as automatic (rendered distinctly from a
+// real typed note) but they otherwise live in the same list, same
+// order, same task. Confidential Notes are the one deliberate
+// exception — those stay out of this feed since they're restricted to
+// Admin/Super Admin and logging them here would leak them to every
+// staff member who can open the task.
+async function logSystemComment(taskId, actorId, text) {
+  await prisma.comment.create({ data: { taskId, isSystem: true, authorId: actorId, text } });
+}
+
 // Always notify the assigned employee + every Admin/Super Admin internally
 // when a task's stage changes — regardless of whether the candidate is
 // also being notified. This is what lets a senior colleague who picks up
@@ -329,12 +343,13 @@ router.get('/:id/overview', requireAuth, async (req, res) => {
   });
 });
 router.post('/', requireAuth, async (req, res) => {
-  const { title, related, country, due, priority, contactPhone, contactEmail, referredByPartnerId } = req.body;
+  const { title, related, country, due, priority, contactPhone, contactEmail, referredByPartnerId, referredByPartnerNameManual } = req.body;
   if (!title || !related || !country || !due) {
     return res.status(400).json({ error: 'title, related, country and due are required.' });
   }
+  let partner = null;
   if (referredByPartnerId) {
-    const partner = await prisma.user.findUnique({ where: { id: referredByPartnerId } });
+    partner = await prisma.user.findUnique({ where: { id: referredByPartnerId } });
     if (!partner || partner.role !== 'CHANNEL_PARTNER') {
       return res.status(400).json({ error: 'referredByPartnerId must be an existing channel partner.' });
     }
@@ -345,9 +360,15 @@ router.post('/', requireAuth, async (req, res) => {
       contactPhone: contactPhone || null, contactEmail: contactEmail || null,
       assignedEmployeeId: req.user.id,
       referredByPartnerId: referredByPartnerId || null,
+      // A partner who referred this candidate but hasn't registered a
+      // portal account yet — free text, only used when there's no real
+      // referredByPartnerId to link to. Once they do register, PATCH
+      // /:id/link-partner formally links the real account.
+      ...(!referredByPartnerId && referredByPartnerNameManual ? { referredByPartnerNameManual: referredByPartnerNameManual.trim() } : {}),
     }
   });
   await logActivity(`New task created: ${title} (related to ${related}).`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Task created by ${req.user.fullName}.` + (referredByPartnerId ? ` Referred by ${partner.fullName}.` : referredByPartnerNameManual ? ` Referred by ${referredByPartnerNameManual.trim()} (not registered yet).` : ''));
   if (referredByPartnerId) {
     await createNotification(
       referredByPartnerId,
@@ -360,6 +381,35 @@ router.post('/', requireAuth, async (req, res) => {
   res.status(201).json(task);
 });
 
+// PATCH /api/tasks/:id/link-partner
+// Body: { partnerId }
+// For a task created with a manually-typed channel partner name
+// (referredByPartnerNameManual) — once that partner actually registers
+// a portal account, this formally links the task to the real account.
+// The manual name is left in place afterward as a historical record of
+// what was originally typed, rather than cleared.
+router.patch('/:id/link-partner', requireAuth, async (req, res) => {
+  const { partnerId } = req.body;
+  if (!partnerId) return res.status(400).json({ error: 'partnerId is required.' });
+  const partner = await prisma.user.findUnique({ where: { id: partnerId } });
+  if (!partner || partner.role !== 'CHANNEL_PARTNER') {
+    return res.status(400).json({ error: 'partnerId must be an existing channel partner.' });
+  }
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const updated = await prisma.task.update({ where: { id: task.id }, data: { referredByPartnerId: partnerId } });
+  await logActivity(`${task.related} — linked to channel partner ${partner.fullName}.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Linked to registered channel partner ${partner.fullName}.`);
+  await createNotification(
+    partnerId,
+    'A case has been linked to your referral',
+    `${task.related} has been added to your dashboard — check My Applicants for the current status.`,
+    'TASK_REFERRAL',
+    'applicants'
+  );
+  res.json(updated);
+});
+
 // PATCH /api/tasks/:id/contact
 // Body: { contactPhone, contactEmail }
 router.patch('/:id/contact', requireAuth, async (req, res) => {
@@ -370,6 +420,27 @@ router.patch('/:id/contact', requireAuth, async (req, res) => {
     where: { id: task.id },
     data: { ...(contactPhone !== undefined ? { contactPhone } : {}), ...(contactEmail !== undefined ? { contactEmail } : {}) },
   });
+  // Only note what actually changed — this fires on every field blur,
+  // including ones where nothing was edited, so a blind "contact
+  // updated" comment on every click would flood the history.
+  const changes = [];
+  if (contactPhone !== undefined && contactPhone !== (task.contactPhone || '')) changes.push(`phone to "${contactPhone || '(cleared)'}"`);
+  if (contactEmail !== undefined && contactEmail !== (task.contactEmail || '')) changes.push(`email to "${contactEmail || '(cleared)'}"`);
+  if (changes.length) await logSystemComment(task.id, req.user.id, `Contact details updated — ${changes.join(', ')}.`);
+  res.json(updated);
+});
+
+// PATCH /api/tasks/:id/country
+// Body: { country }
+router.patch('/:id/country', requireAuth, async (req, res) => {
+  const { country } = req.body;
+  if (!country) return res.status(400).json({ error: 'country is required.' });
+  const task = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const previousCountry = task.country;
+  const updated = await prisma.task.update({ where: { id: task.id }, data: { country } });
+  await logActivity(`${task.related} — country changed to ${country}.`, req.user.id);
+  if (previousCountry !== country) await logSystemComment(task.id, req.user.id, `Country changed from "${previousCountry || '—'}" to "${country}".`);
   res.json(updated);
 });
 
@@ -381,6 +452,7 @@ router.patch('/:id/priority', requireAuth, async (req, res) => {
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: task.id }, data: { priority } });
   await logActivity(`${task.related} — task "${task.title}" priority changed to ${priority}.`, req.user.id);
+  if (task.priority !== priority) await logSystemComment(task.id, req.user.id, `Priority changed from "${task.priority}" to "${priority}".`);
   res.json(updated);
 });
 
@@ -439,7 +511,7 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
         ? (isAutoRevert ? ' (reverted to automatic, following Stage — no candidate email sent).' : ' — marked as an internal duplicate, no candidate email sent.')
         : ` — email ${mailResult.delivered ? 'sent' : 'logged'} to ${task.related}.`);
   await prisma.comment.create({
-    data: { taskId: task.id, isSystem: true, text: `Status changed to "${status}"` + emailNote }
+    data: { taskId: task.id, isSystem: true, authorId: req.user.id, text: `Status changed to "${status}"` + emailNote }
   });
   await prisma.taskHistoryEntry.create({ data: { taskId: task.id, action: `Status changed to "${status}"`, actorId: req.user.id } });
   await logActivity(`${task.related} — task "${task.title}" status changed to "${status}".`, req.user.id);
@@ -569,6 +641,20 @@ router.patch('/:id/overview', requireAuth, async (req, res) => {
     },
   });
   await logActivity(`${task.related} — overview updated.`, req.user.id);
+  // Overview/Course/College/etc. are "always-current" fields (overwritten,
+  // not appended to like a comment thread) — so which of them actually
+  // changed, and by whom, would otherwise be lost the next time someone
+  // overwrites them. Note it here, in plain field names, without dumping
+  // the full free-text overview into the comment.
+  const overviewChanges = [];
+  if (overview !== undefined && overview !== (task.overview || '')) overviewChanges.push('Overview');
+  if (course !== undefined && course !== (task.course || '')) overviewChanges.push(`Course → "${course || '—'}"`);
+  if (college !== undefined && college !== (task.college || '')) overviewChanges.push(`College → "${college || '—'}"`);
+  if (applicationId !== undefined && applicationId !== (task.applicationId || '')) overviewChanges.push(`Application ID → "${applicationId || '—'}"`);
+  if (intake !== undefined && intake !== (task.intake || '')) overviewChanges.push(`Intake → "${intake || '—'}"`);
+  if (fees !== undefined && fees !== (task.fees || '')) overviewChanges.push(`Fees → "${fees || '—'}"`);
+  if (customFields !== undefined) overviewChanges.push('custom fields');
+  if (overviewChanges.length) await logSystemComment(task.id, req.user.id, `Case overview updated — ${overviewChanges.join(', ')}.`);
   res.json(updated);
 });
 
@@ -580,6 +666,7 @@ router.patch('/:id/interview-notes', requireAuth, async (req, res) => {
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: task.id }, data: { interviewNotes } });
   await logActivity(`${task.related} — interview notes updated.`, req.user.id);
+  if (interviewNotes !== (task.interviewNotes || '')) await logSystemComment(task.id, req.user.id, 'Interview notes updated.');
   res.json(updated);
 });
 
@@ -606,6 +693,7 @@ router.post('/:id/applications', requireAuth, async (req, res) => {
     },
   });
   await logActivity(`${task.related} — added "${application.label}" (${institution || 'institution TBD'}).`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Application added: "${application.label}" (${institution || 'institution TBD'}).`);
   res.status(201).json(application);
 });
 
@@ -630,6 +718,7 @@ router.patch('/applications/:id', requireAuth, async (req, res) => {
     },
   });
   await logActivity(`${application.task.related} — "${updated.label}" updated${status !== undefined ? ' — status: ' + status : ''}.`, req.user.id);
+  await logSystemComment(application.taskId, req.user.id, `Application "${updated.label}" updated${status !== undefined ? ' — status: ' + status : ''}.`);
   res.json(updated);
 });
 
@@ -639,6 +728,7 @@ router.delete('/applications/:id', requireAuth, async (req, res) => {
   if (!application) return res.status(404).json({ error: 'Application not found.' });
   await prisma.application.delete({ where: { id: req.params.id } });
   await logActivity(`${application.task.related} — removed "${application.label}".`, req.user.id);
+  await logSystemComment(application.taskId, req.user.id, `Application removed: "${application.label}".`);
   res.json({ success: true });
 });
 
@@ -656,6 +746,11 @@ router.patch('/:id/reference', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'),
     data: { referenceName, referencePhone },
   });
   await logActivity(`${task.related} — reference contact updated.`, req.user.id);
+  // Deliberately doesn't include referencePhone here — that field is
+  // masked from non-Admin roles on every other read (maskAdminOnlyFields),
+  // and putting it in plain text inside a comment everyone can read would
+  // undo that restriction.
+  await logSystemComment(task.id, req.user.id, `Reference contact updated${referenceName !== undefined ? ` — name: "${referenceName || '—'}"` : ''}.`);
   res.json(updated);
 });
 
@@ -779,6 +874,7 @@ router.patch('/:id/case-type', requireAuth, async (req, res) => {
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: task.id }, data: { caseType: caseType || null } });
   await logActivity(`${task.related} — case type set to ${caseType || 'unspecified'}.`, req.user.id);
+  if ((task.caseType || null) !== (caseType || null)) await logSystemComment(task.id, req.user.id, `Case type set to "${caseType || 'unspecified'}".`);
   res.json(updated);
 });
 
@@ -791,6 +887,11 @@ router.patch('/:id/loan', requireAuth, async (req, res) => {
     data: { loanBankName, loanOfficialName, loanOfficialContact, loanAmount, loanReferenceNumber, loanStatus, loanNotes },
   });
   await logActivity(`${task.related} — loan details updated.`, req.user.id);
+  if ((task.loanStatus || '') !== (loanStatus || '')) {
+    await logSystemComment(task.id, req.user.id, `Loan details updated — status: "${loanStatus || 'unspecified'}".`);
+  } else {
+    await logSystemComment(task.id, req.user.id, 'Loan details updated.');
+  }
   res.json(updated);
 });
 
@@ -809,6 +910,7 @@ router.patch('/:id/visa', requireAuth, async (req, res) => {
     },
   });
   await logActivity(`${task.related} — visa details updated.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Visa details updated${visaType !== undefined ? ` — type: "${visaType || 'unspecified'}"` : ''}.`);
   res.json(updated);
 });
 
@@ -833,6 +935,7 @@ router.post('/:id/visa-documents', requireAuth, async (req, res) => {
     data: { taskId: task.id, fileName, mimeType: mimeType || 'application/pdf', fileData, uploadedById: req.user.id },
   });
   await logActivity(`${task.related} — visa document "${fileName}" uploaded.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Visa document uploaded: "${fileName}".`);
   res.status(201).json({ id: doc.id, fileName: doc.fileName, mimeType: doc.mimeType, uploadedAt: doc.uploadedAt });
 });
 
@@ -849,7 +952,12 @@ router.get('/visa-documents/:docId/raw', requireAuth, async (req, res) => {
 });
 
 router.delete('/visa-documents/:docId', requireAuth, async (req, res) => {
+  const doc = await prisma.visaDocument.findUnique({ where: { id: req.params.docId } });
   await prisma.visaDocument.delete({ where: { id: req.params.docId } });
+  if (doc) {
+    await logActivity(`Visa document "${doc.fileName}" removed.`, req.user.id);
+    await logSystemComment(doc.taskId, req.user.id, `Visa document removed: "${doc.fileName}".`);
+  }
   res.json({ success: true });
 });
 
@@ -1010,6 +1118,7 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
     data: { taskId: task.id, action: employee ? `Assigned to ${employee.fullName}` : 'Unassigned — now open for anyone', actorId: req.user.id },
   });
   await logActivity(`${updated.related} — ${assignedEmployeeId ? 'reassigned' : 'unassigned, now open for anyone'}.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, employee ? `Reassigned to ${employee.fullName}.` : 'Unassigned — now open for anyone to claim.');
   res.json(updated);
 });
 
@@ -1069,6 +1178,7 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
 
   const updated = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: student.id } });
   await logActivity(`${task.related} linked to student portal account (${studentEmail})${createdNewAccount ? ' — new account created' : reactivatedAccount ? ' — previously-disabled account reactivated' : ''}.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Linked to student portal account (${studentEmail})${createdNewAccount ? ' — new account created' : reactivatedAccount ? ' — previously-disabled account reactivated' : ''}.`);
 
   if (createdNewAccount || reactivatedAccount) {
     sendMail({
@@ -1094,6 +1204,7 @@ router.patch('/:id/unlink-student', requireAuth, requireRole('ADMIN', 'SUPER_ADM
   if (!task.studentId) return res.status(400).json({ error: 'This task isn\'t linked to a student account.' });
   const updated = await prisma.task.update({ where: { id: req.params.id }, data: { studentId: null } });
   await logActivity(`${task.related} — student portal link removed.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, 'Student portal link removed.');
   res.json({ task: updated });
 });
 
@@ -1107,6 +1218,7 @@ router.patch('/:id/hide', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: req.params.id }, data: { hidden: true } });
   await logActivity(`${task.related} — task hidden from the list by ${req.user.fullName}.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Task hidden from the list by ${req.user.fullName}.`);
   res.json({ task: updated });
 });
 
@@ -1116,6 +1228,7 @@ router.patch('/:id/unhide', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), as
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   const updated = await prisma.task.update({ where: { id: req.params.id }, data: { hidden: false } });
   await logActivity(`${task.related} — task unhidden by ${req.user.fullName}.`, req.user.id);
+  await logSystemComment(task.id, req.user.id, `Task unhidden by ${req.user.fullName}.`);
   res.json({ task: updated });
 });
 
