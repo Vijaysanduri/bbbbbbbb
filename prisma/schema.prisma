@@ -614,6 +614,7 @@ model Lead {
   // the lead has been handed to a real employee.
   referredByPartnerId String?
   referredByPartner   User?   @relation("PartnerReferral", fields: [referredByPartnerId], references: [id])
+  referredByPartnerNameManual String?
 
   // Call-outcome tracking — set every time an employee logs a follow-up,
   // so leads can be filtered by "what happened last time we called them"
