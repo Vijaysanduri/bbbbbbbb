@@ -48,6 +48,7 @@ const promotionsRoutes = require('./routes/promotions.routes');
 const scheduledPromotionsRoutes = require('./routes/scheduledPromotions.routes');
 const paymentsRoutes = require('./routes/payments.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
+const partnerAgreementTemplateRoutes = require('./routes/partnerAgreementTemplate.routes');
 
 const app = express();
 app.set('trust proxy', 1); // Railway sits behind a proxy — needed so req.ip is the real client, not the proxy, which matters for rate limiting below
@@ -129,6 +130,7 @@ app.use('/api/promotions', promotionsRoutes);
 app.use('/api/scheduled-promotions', scheduledPromotionsRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/partner-agreement-template', partnerAgreementTemplateRoutes);
 
 // Centralized error handler — keeps stack traces out of API responses.
 // Now also writes every error to the ErrorLog table (in addition to the
