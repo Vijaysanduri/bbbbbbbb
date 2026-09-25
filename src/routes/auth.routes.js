@@ -664,8 +664,15 @@ router.post('/employees', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), asyn
     try {
       // Individually-assigned documents (targetUserId set) are also
       // excluded - those are for one specific person, not a broadcast.
+      //
+      // isCurrentVersion:true is deliberate - active alone isn't enough,
+      // since the OLD row of a versioned document stays active:true even
+      // after a newer version replaces it (only isCurrentVersion flips
+      // to false on the old one). Without this filter, a new employee
+      // could be auto-assigned a superseded copy of a document that has
+      // since been updated to a new version.
       const activeDocs = await prisma.signableDocument.findMany({
-        where: { active: true, targetUserId: null, targetRole: { in: ['EMPLOYEE', 'ALL'] } },
+        where: { active: true, isCurrentVersion: true, targetUserId: null, targetRole: { in: ['EMPLOYEE', 'ALL'] } },
       });
       for (const doc of activeDocs) {
         await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: created.id } });

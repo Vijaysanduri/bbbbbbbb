@@ -102,18 +102,119 @@ router.post('/:id/acks/:userId/reject', requireAuth, requireRole('ADMIN', 'SUPER
   res.json(ack);
 });
 
+// Only the CURRENT version of each document is listed here — older
+// versions still exist in the database (with their own signed/uploaded
+// acknowledgments intact, exactly as each person left them) but are
+// reached via GET /:id/versions instead of cluttering this main list.
+// isCurrentVersion defaults to true, so every document created before
+// this versioning feature existed is automatically treated as current.
 router.get('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
   const docs = await prisma.signableDocument.findMany({
+    where: { isCurrentVersion: true },
     include: { acknowledgments: true },
     orderBy: { createdAt: 'desc' },
   });
   const withCounts = docs.map(d => ({
     id: d.id, title: d.title, category: d.category, description: d.description,
     fileName: d.fileName, mimeType: d.mimeType, createdAt: d.createdAt, targetRole: d.targetRole, active: d.active,
+    version: d.version,
     signedCount: d.acknowledgments.filter(a => a.signedAt || a.uploadedFileData).length,
     totalCount: d.acknowledgments.length,
   }));
   res.json(withCounts);
+});
+
+// GET /api/signable-documents/:id/versions — Admin/HR/Super Admin only.
+// Every version of this document (this one plus every older one it
+// replaced), newest first — so a version that's since been superseded
+// can still be pulled up for reference (e.g. to see exactly what a
+// candidate signed, even if the document has since been updated).
+router.get('/:id/versions', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const doc = await prisma.signableDocument.findUnique({ where: { id: req.params.id } });
+  if (!doc) return res.status(404).json({ error: 'Not found.' });
+  const groupKey = doc.groupKey || doc.id;
+  const versions = await prisma.signableDocument.findMany({
+    where: { OR: [{ groupKey }, { id: groupKey }] },
+    include: { acknowledgments: true },
+    orderBy: { version: 'desc' },
+  });
+  res.json(versions.map(d => ({
+    id: d.id, title: d.title, version: d.version, isCurrentVersion: d.isCurrentVersion,
+    fileName: d.fileName, mimeType: d.mimeType, createdAt: d.createdAt, active: d.active,
+    signedCount: d.acknowledgments.filter(a => a.signedAt || a.uploadedFileData).length,
+    totalCount: d.acknowledgments.length,
+  })));
+});
+
+// POST /api/signable-documents/:id/new-version — Admin/HR/Super Admin
+// only. Body: { fileName, mimeType, fileData, description? }
+//
+// Uploads a replacement file for an existing document WITHOUT touching
+// the old one — this is what makes it safe to update an agreement that
+// people have already signed:
+//   - Everyone who already signed or uploaded a copy against the OLD
+//     version keeps that record exactly as it was, still reachable via
+//     Version History — what they actually signed is never altered or
+//     hidden.
+//   - Everyone still pending (hasn't signed/uploaded yet) is moved onto
+//     the NEW version instead, and gets a fresh notification — so
+//     nobody is left signing an out-of-date copy.
+//   - From this point on, this is the version everything else (the
+//     "Use" action, automation, new recipients) works from — the old
+//     one is kept only for the historical record.
+router.post('/:id/new-version', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (req, res) => {
+  const { fileName, mimeType, fileData, description } = req.body;
+  if (!fileName || !fileData) return res.status(400).json({ error: 'fileName and fileData are required.' });
+  const old = await prisma.signableDocument.findUnique({ where: { id: req.params.id } });
+  if (!old) return res.status(404).json({ error: 'Not found.' });
+
+  const groupKey = old.groupKey || old.id;
+  const newDoc = await prisma.signableDocument.create({
+    data: {
+      title: old.title,
+      category: old.category,
+      description: description !== undefined ? (description || null) : old.description,
+      fileName, mimeType: mimeType || 'application/pdf', fileData,
+      createdById: req.user.id,
+      targetRole: old.targetRole,
+      targetUserId: old.targetUserId,
+      version: old.version + 1,
+      groupKey,
+      isCurrentVersion: true,
+      previousVersionId: old.id,
+    },
+  });
+  await prisma.signableDocument.update({ where: { id: old.id }, data: { isCurrentVersion: false, groupKey } });
+
+  // Move anyone still pending onto the new version; leave everyone who
+  // already completed the old one untouched, on the old document.
+  const pendingAcks = await prisma.signableDocumentAck.findMany({
+    where: { documentId: old.id, signedAt: null, uploadedFileData: null },
+    include: { user: true },
+  });
+  let migratedCount = 0;
+  for (const ack of pendingAcks) {
+    await prisma.signableDocumentAck.delete({ where: { id: ack.id } });
+    await prisma.signableDocumentAck.create({ data: { documentId: newDoc.id, userId: ack.userId } });
+    migratedCount++;
+    if (ack.user) {
+      try {
+        await sendMail({
+          to: ack.user.email,
+          subject: `Updated: "${newDoc.title}" needs your signature`,
+          body: `Hi ${ack.user.fullName},\n\n"${newDoc.title}" has been updated to a new version. Please review and sign the latest copy from your portal — the previous version is no longer needed.\n\nBest,\nDream2Fly`,
+        });
+      } catch (err) {
+        console.error(`[signable-documents] New-version email failed for ${ack.user.email}:`, err.message);
+      }
+    }
+  }
+  const completedCount = old.acknowledgments ? undefined : await prisma.signableDocumentAck.count({
+    where: { documentId: old.id },
+  });
+
+  await logActivity(`${req.user.fullName} uploaded a new version (v${newDoc.version}) of "${old.title}" — ${migratedCount} pending recipient(s) moved to it, ${completedCount} who already completed it keep their signed copy on record.`, req.user.id);
+  res.status(201).json({ document: newDoc, migratedCount, completedCount });
 });
 
 // POST /api/signable-documents — Admin/HR/Super Admin only.

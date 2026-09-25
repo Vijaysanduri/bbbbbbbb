@@ -496,6 +496,22 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     try {
       const email = renderTemplate(status, task.related);
       mailResult = await sendMail({ to: task.contactEmail, subject: email.subject, body: email.body });
+      // Also log this as a real, non-system candidate-facing comment -
+      // not just the internal "Status changed to..." system note below.
+      // The 7pm automatic stale-reminder (scheduler.js) only recognizes
+      // the candidate as "already updated today" when it finds a
+      // genuine (isSystem:false) CANDIDATE_FACING comment - without
+      // this, a manual notify via Status change was invisible to that
+      // check and the automatic reminder would still fire tonight on
+      // top of it. Logged as a best-effort - never let this block the
+      // response if it fails.
+      try {
+        await prisma.comment.create({
+          data: { taskId: task.id, authorId: req.user.id, channel: 'CANDIDATE_FACING', text: email.body },
+        });
+      } catch (logErr) {
+        console.error(`[tasks] Could not log candidate-facing status email for task ${task.id}:`, logErr.message);
+      }
     } catch (err) {
       // The status change itself already succeeded above - a mail
       // provider rejection or outage should never undo that or block
@@ -592,6 +608,21 @@ router.patch('/:id/stage', requireAuth, async (req, res) => {
           console.error(`[tasks] Stage-change WhatsApp failed for task ${task.id}:`, err.message);
           candidateWhatsAppResult = { delivered: false, skipped: false, error: err.message };
         }
+      }
+    }
+    // Same reasoning as the Status-change endpoint above: log a real,
+    // non-system CANDIDATE_FACING comment whenever an attempt to notify
+    // actually went out (by either channel), so the 7pm automatic
+    // stale-reminder in scheduler.js sees the candidate was genuinely
+    // updated today and skips resending on top of this. Best-effort -
+    // never blocks the response.
+    if (candidateMailResult.delivered || candidateWhatsAppResult.delivered) {
+      try {
+        await prisma.comment.create({
+          data: { taskId: task.id, authorId: req.user.id, channel: 'CANDIDATE_FACING', text: email.body },
+        });
+      } catch (logErr) {
+        console.error(`[tasks] Could not log candidate-facing stage email for task ${task.id}:`, logErr.message);
       }
     }
   }
@@ -961,6 +992,32 @@ router.delete('/visa-documents/:docId', requireAuth, async (req, res) => {
   res.json({ success: true });
 });
 
+// GET /api/tasks/:id/comments/export — same pattern as the existing
+// /confidential-notes/export just below: one plain-text file, newest
+// first, no PDF/branding involved. Both Internal and Candidate-facing
+// comments are included, each clearly labeled — Confidential Notes are
+// a separate feature entirely and are never included here.
+router.get('/:id/comments/export', requireAuth, async (req, res) => {
+  const task = await prisma.task.findUnique({
+    where: { id: req.params.id },
+    include: { comments: { orderBy: { createdAt: 'desc' }, include: { author: { select: { fullName: true } } } } },
+  });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+  const lines = [`Comments — ${task.title} (${task.related})`, '='.repeat(50), ''];
+  task.comments.forEach(c => {
+    const ts = c.createdAt.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const who = (c.author && c.author.fullName) || (c.isSystem ? 'System' : 'Unknown');
+    const tags = [c.isSystem ? 'automatic' : null, c.channel === 'CANDIDATE_FACING' ? 'sent to candidate' : 'internal only'].filter(Boolean).join(', ');
+    lines.push(`[${ts} — ${who}${tags ? ' — ' + tags : ''}]`);
+    lines.push(c.text || '(attachment only)');
+    lines.push('');
+  });
+  if (!task.comments.length) lines.push('No comments on record.');
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="comments-${task.taskNumber || task.id}.txt"`);
+  res.send(lines.join('\n'));
+});
+
 // POST /api/tasks/:id/comments
 // Body: { text, attachmentUrl?, attachmentName?, channel? }
 // channel: 'INTERNAL' (default, staff-only) or 'CANDIDATE_FACING' — the
@@ -1186,6 +1243,42 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
       subject: reactivatedAccount ? `Your Dream2Fly student portal is active again` : `Your Dream2Fly student portal is ready`,
       body: `Hi ${task.related},\n\nYour Dream2Fly student portal ${reactivatedAccount ? 'has been reactivated' : 'has been set up'} — you can now track your application, message your counsellor, and manage documents online.\n\nPortal: https://dream2fly.co.uk/login.html\nEmail: ${studentEmail}\nPassword: ${plainPassword}\n\nPlease sign in and change your password as soon as you can.\n\nBest,\nDream2Fly`,
     }).catch(err => console.error('[link-student] Welcome email failed:', err.message));
+
+    // Auto-assign every currently-active, CURRENT-version broadcast
+    // document targeted at Students (e.g. the Consent Letter) to this
+    // account — without this, a student linked to the portal after a
+    // document was last uploaded/versioned would never get an ack for
+    // it at all, since acks are normally only created at upload/
+    // new-version time against whoever already existed then. Mirrors
+    // the same auto-assign-on-create behavior already in place for new
+    // Employee accounts (auth.routes.js).
+    //
+    // isCurrentVersion:true is deliberate — active alone isn't enough,
+    // since the OLD row of a versioned document stays active:true even
+    // after a newer version replaces it (only isCurrentVersion flips).
+    // Without this filter a new student could be handed a superseded
+    // copy alongside, or instead of, the current one.
+    //
+    // targetUserId:null excludes individually-assigned documents (e.g.
+    // one specific student's own file) - those were never meant to be
+    // broadcast to every new student.
+    try {
+      const activeStudentDocs = await prisma.signableDocument.findMany({
+        where: { active: true, isCurrentVersion: true, targetUserId: null, targetRole: { in: ['STUDENT', 'ALL'] } },
+      });
+      for (const doc of activeStudentDocs) {
+        const existingAck = await prisma.signableDocumentAck.findFirst({ where: { documentId: doc.id, userId: student.id } });
+        if (existingAck) continue; // e.g. a reactivated account that already had this one pending
+        await prisma.signableDocumentAck.create({ data: { documentId: doc.id, userId: student.id } });
+        sendMail({
+          to: studentEmail,
+          subject: `Action needed: ${doc.title}`,
+          body: `Hi ${task.related},\n\nA ${doc.category === 'AGREEMENT' ? 'agreement' : 'document'} "${doc.title}" needs your signature. Please review and sign it from your portal.\n\nBest,\nDream2Fly`,
+        }).catch(err => console.error('[link-student] Document notification email failed:', err.message));
+      }
+    } catch (err) {
+      console.error('[link-student] Auto-assigning existing documents failed:', err.message);
+    }
   }
 
   res.json({ task: updated, createdNewAccount, reactivatedAccount });

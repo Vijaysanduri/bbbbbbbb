@@ -272,6 +272,31 @@ router.get('/:userId/comments', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN')
   res.json(comments);
 });
 
+// GET /api/partner-profile/:userId/comments/export — Admin/Super Admin
+// only. Same plain-text export pattern used for Task comments/
+// confidential notes, newest first.
+router.get('/:userId/comments/export', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const partner = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (!partner) return res.status(404).json({ error: 'Partner not found.' });
+  const comments = await prisma.comment.findMany({
+    where: { partnerId: req.params.userId },
+    include: { author: { select: { fullName: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  const lines = [`Activity & Comments — ${partner.fullName}`, '='.repeat(50), ''];
+  comments.forEach(c => {
+    const ts = c.createdAt.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const who = (c.author && c.author.fullName) || (c.isSystem ? 'System' : 'Unknown');
+    lines.push(`[${ts} — ${who}${c.isSystem ? ' — automatic' : ''}]`);
+    lines.push(c.text || '(attachment only)');
+    lines.push('');
+  });
+  if (!comments.length) lines.push('No comments on record.');
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="comments-${partner.fullName.replace(/[^a-z0-9]+/gi, '-')}.txt"`);
+  res.send(lines.join('\n'));
+});
+
 // POST /api/partner-profile/:userId/comments — Admin/Super Admin only.
 // Adds a manual note to the same thread - isSystem: false distinguishes
 // this from the automated entries logged elsewhere in this file.

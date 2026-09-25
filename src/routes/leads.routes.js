@@ -408,6 +408,29 @@ router.post('/:id/notify-candidate', requireAuth, async (req, res) => {
   res.json({ subject, body, mailResult, whatsAppResult });
 });
 
+// GET /api/leads/:id/comments/export — same plain-text export pattern
+// used for Task confidential notes/comments, newest first.
+router.get('/:id/comments/export', requireAuth, async (req, res) => {
+  const lead = await prisma.lead.findUnique({
+    where: { id: req.params.id },
+    include: { comments: { orderBy: { createdAt: 'desc' }, include: { author: { select: { fullName: true } } } } },
+  });
+  if (!lead) return res.status(404).json({ error: 'Lead not found.' });
+  const lines = [`Comments — ${lead.name}`, '='.repeat(50), ''];
+  lead.comments.forEach(c => {
+    const ts = c.createdAt.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const who = (c.author && c.author.fullName) || (c.isSystem ? 'System' : 'Unknown');
+    const tags = [c.isSystem ? 'automatic' : null, c.channel === 'CANDIDATE_FACING' ? 'sent to candidate' : 'internal only'].filter(Boolean).join(', ');
+    lines.push(`[${ts} — ${who}${tags ? ' — ' + tags : ''}]`);
+    lines.push(c.text || '(attachment only)');
+    lines.push('');
+  });
+  if (!lead.comments.length) lines.push('No comments on record.');
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="comments-${lead.id}.txt"`);
+  res.send(lines.join('\n'));
+});
+
 // POST /api/leads/:id/comments
 // Body: { text, attachmentUrl?, attachmentName?, channel? }
 router.post('/:id/comments', requireAuth, async (req, res) => {
