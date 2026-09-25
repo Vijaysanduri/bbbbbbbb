@@ -20,6 +20,13 @@ async function deliverPartnerAgreement(partnerId, { businessName, effectiveDate,
 
   const name = displayName || partner.fullName;
 
+  // Whatever's currently saved in the editable template (Channel
+  // Partners → ✏️ Edit Agreement Template) is used if it exists;
+  // generatePartnerAgreementPdf falls back to its own hardcoded default
+  // wording if nothing's been saved yet, so this never fails just
+  // because the template row doesn't exist.
+  const savedTemplate = await prisma.partnerAgreementTemplate.findUnique({ where: { id: 'default' } });
+
   const pdfBuffer = await generatePartnerAgreementPdf({
     partnerName: name,
     partnerId: partner.id.slice(-8).toUpperCase(),
@@ -29,6 +36,12 @@ async function deliverPartnerAgreement(partnerId, { businessName, effectiveDate,
     businessName: businessName || '',
     effectiveDate: effectiveDate || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }),
     responseDeadline: responseDeadline || new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }),
+    introText: savedTemplate ? savedTemplate.introText : undefined,
+    // Stored as [{ title, text }, ...] (friendlier shape for the admin
+    // edit screen's JSON); generatePartnerAgreementPdf expects
+    // [[title, text], ...] pairs — converted here at the boundary so
+    // neither side has to know about the other's preferred shape.
+    clauses: savedTemplate ? savedTemplate.clauses.map(c => [c.title, c.text]) : undefined,
   });
 
   const fileName = `Channel-Partner-Agreement-${name.replace(/\s+/g, '-')}.pdf`;

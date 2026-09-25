@@ -4,7 +4,16 @@ const { HEADER_BASE64, FOOTER_BASE64, SIGNATURE_BASE64, STAMP_BASE64 } = require
 const NAVY = '#0b1f4d';
 const GRAY = '#888888';
 
-const CLAUSES = [
+// The intro paragraph supports the same {{placeholder}} merge fields as
+// the clause text below — filled in by fillPlaceholders() further down.
+// These two constants are only the FALLBACK, used when nothing has been
+// saved yet in the PartnerAgreementTemplate table. Once an Admin edits
+// and saves the template from Channel Partners → ✏️ Edit Agreement
+// Template, their saved intro/clauses are used instead — no code change
+// or deploy needed for future wording edits.
+const DEFAULT_INTRO_TEXT = `We are pleased to set out below the terms on which Dream2Fly Consulting Services Limited ("the Company") and {{businessOrPartnerName}} ("the Partner", Partner ID: {{partnerId}}) will work together to refer prospective candidates ("Candidates") to the Company for study-abroad and related services. This Agreement is effective from {{effectiveDate}} and remains in force until terminated as set out in Clause 6 below.`;
+
+const DEFAULT_CLAUSES = [
   ['1. Purpose', 'The Partner will refer prospective Candidates to the Company for study-abroad and related services. This Agreement sets out the basis on which such referrals are handled, and the basis on which commission is earned and paid for successful referrals.'],
   ['2. Candidate Financial Matters', "Where the Company itself collects any payment directly from a Candidate, that payment shall be received into the Company's official account only, and a clear written acknowledgment (receipt) shall be issued to the Candidate for it. Where the Partner collects any payment directly from a Candidate, that arrangement is solely between the Partner and the Candidate; the Company is not a party to it and bears no responsibility or liability for it. The Partner shall not bring any claim, suit, or demand against the Company arising from money owed by, owed to, or disputed with a Candidate, and waives any right to do so."],
   ['3. Document Integrity', 'The Partner warrants that all documents, information, and representations submitted on behalf of a Candidate are genuine, accurate, and not fraudulently obtained or altered. The Partner shall not submit, or assist a Candidate in submitting, fake, forged, or materially misleading documents of any kind. The Company shall bear no responsibility or liability for a visa refusal, loan refusal, or any other adverse outcome, where such outcome arises from inaccurate, incomplete, or fraudulent documentation submitted in connection with a Candidate referred by the Partner.'],
@@ -15,12 +24,33 @@ const CLAUSES = [
   ['8. Governing Law', 'This Agreement shall be governed by the laws of [Governing Law / Jurisdiction — to be confirmed with legal counsel].'],
 ];
 
+// Fills {{placeholder}} tokens in editable text (the intro paragraph and,
+// for anyone who adds one later, a clause body) with the real values for
+// this send. Any token that isn't one of these known names is left as-is
+// rather than silently deleted, so a typo in a saved template is obvious
+// instead of quietly vanishing from the generated PDF.
+function fillAgreementPlaceholders(text, values) {
+  return text.replace(/\{\{(\w+)\}\}/g, (match, key) => (key in values ? values[key] : match));
+}
+
 // Auto-fills a partner's real name, ID, email, phone, and address from
 // their account — the only thing that can't be auto-filled is Business
 // Name, since no such field exists anywhere in the data model; that one
 // piece is asked for once at generation time instead of needing the
 // whole document re-created by hand.
-function generatePartnerAgreementPdf({ partnerName, partnerId, partnerEmail, partnerPhone, partnerAddress, businessName, effectiveDate, responseDeadline }) {
+//
+// introText and clauses are optional — omit them to fall back to
+// DEFAULT_INTRO_TEXT/DEFAULT_CLAUSES above. partnerAgreementDelivery.js
+// normally passes in whatever's currently saved in the
+// PartnerAgreementTemplate table.
+function generatePartnerAgreementPdf({ partnerName, partnerId, partnerEmail, partnerPhone, partnerAddress, businessName, effectiveDate, responseDeadline, introText, clauses }) {
+  const resolvedIntroText = introText || DEFAULT_INTRO_TEXT;
+  const resolvedClauses = Array.isArray(clauses) && clauses.length ? clauses : DEFAULT_CLAUSES;
+  const placeholderValues = {
+    partnerName, partnerId, partnerEmail, partnerPhone: partnerPhone || '—', partnerAddress: partnerAddress || '',
+    businessName: businessName || '', businessOrPartnerName: businessName || partnerName,
+    effectiveDate, responseDeadline,
+  };
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', margin: 0 });
     const chunks = [];
@@ -84,12 +114,12 @@ function generatePartnerAgreementPdf({ partnerName, partnerId, partnerEmail, par
     boldLine(`Dear ${partnerName},`);
     doc.moveDown(0.3);
 
-    bodyText(`We are pleased to set out below the terms on which Dream2Fly Consulting Services Limited ("the Company") and ${businessName || partnerName} ("the Partner", Partner ID: ${partnerId}) will work together to refer prospective candidates ("Candidates") to the Company for study-abroad and related services. This Agreement is effective from ${effectiveDate} and remains in force until terminated as set out in Clause 6 below.`);
+    bodyText(fillAgreementPlaceholders(resolvedIntroText, placeholderValues));
 
-    for (const [title, text] of CLAUSES) {
+    for (const [title, text] of resolvedClauses) {
       if (doc.y > CONTENT_BOTTOM - 60) doc.addPage();
       boldLine(title);
-      for (const para of text.split('\n\n')) bodyText(para);
+      for (const para of fillAgreementPlaceholders(text, placeholderValues).split('\n\n')) bodyText(para);
     }
 
     if (doc.y > CONTENT_BOTTOM - 100) doc.addPage();
@@ -125,4 +155,4 @@ function generatePartnerAgreementPdf({ partnerName, partnerId, partnerEmail, par
   });
 }
 
-module.exports = { generatePartnerAgreementPdf };
+module.exports = { generatePartnerAgreementPdf, DEFAULT_INTRO_TEXT, DEFAULT_CLAUSES };
