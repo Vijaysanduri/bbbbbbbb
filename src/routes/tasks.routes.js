@@ -48,6 +48,13 @@ async function logActivity(text, actorId) {
 async function logSystemComment(taskId, actorId, text) {
   await prisma.comment.create({ data: { taskId, isSystem: true, authorId: actorId, text } });
 }
+// Same as above, but logs into one specific Application's own thread
+// instead of the task's general one — used for changes to that
+// application's own case/loan/visa fields, so its history explains
+// itself without mixing into (or being missed from) the general thread.
+async function logApplicationSystemComment(applicationId, taskId, actorId, text) {
+  await prisma.comment.create({ data: { taskId, applicationId, isSystem: true, authorId: actorId, text } });
+}
 
 // Always notify the assigned employee + every Admin/Super Admin internally
 // when a task's stage changes — regardless of whether the candidate is
@@ -720,7 +727,7 @@ router.post('/:id/applications', requireAuth, async (req, res) => {
     data: {
       taskId: task.id,
       label: label || `Application ${existingCount + 1}`,
-      institution, program, country, intake, applicationId, status, notes,
+      institution, program, country: country || task.country, intake, applicationId, status, notes,
     },
   });
   await logActivity(`${task.related} — added "${application.label}" (${institution || 'institution TBD'}).`, req.user.id);
@@ -731,10 +738,20 @@ router.post('/:id/applications', requireAuth, async (req, res) => {
 // PATCH /api/tasks/applications/:id — update one application's details.
 // Note this is NOT nested under /tasks/:taskId/ — the application's own
 // id is sufficient to find and update it directly.
+//
+// Covers the full field set now, mirroring the Task-level PATCH routes
+// (/overview, /interview-notes, /loan, /visa, /case-type) one-for-one,
+// all through this single endpoint rather than five separate ones —
+// simpler for the frontend, since it's already one "Save" per section
+// of the Application Detail view. Every field is optional/independent
+// (undefined = "leave as is"), same convention as the Task overview route.
 router.patch('/applications/:id', requireAuth, async (req, res) => {
   const application = await prisma.application.findUnique({ where: { id: req.params.id }, include: { task: true } });
   if (!application) return res.status(404).json({ error: 'Application not found.' });
-  const { label, institution, program, country, intake, applicationId, status, notes } = req.body;
+  const {
+    label, institution, program, country, intake, applicationId, status, notes,
+    caseType, caseStatus, stage, fees, overview, interviewNotes,
+  } = req.body;
   const updated = await prisma.application.update({
     where: { id: req.params.id },
     data: {
@@ -746,10 +763,30 @@ router.patch('/applications/:id', requireAuth, async (req, res) => {
       ...(applicationId !== undefined ? { applicationId } : {}),
       ...(status !== undefined ? { status } : {}),
       ...(notes !== undefined ? { notes } : {}),
+      ...(caseType !== undefined ? { caseType } : {}),
+      ...(caseStatus !== undefined ? { caseStatus: caseStatus || null } : {}),
+      ...(stage !== undefined ? { stage } : {}),
+      ...(fees !== undefined ? { fees } : {}),
+      ...(overview !== undefined ? { overview } : {}),
+      ...(interviewNotes !== undefined ? { interviewNotes } : {}),
     },
   });
   await logActivity(`${application.task.related} — "${updated.label}" updated${status !== undefined ? ' — status: ' + status : ''}.`, req.user.id);
-  await logSystemComment(application.taskId, req.user.id, `Application "${updated.label}" updated${status !== undefined ? ' — status: ' + status : ''}.`);
+
+  // One plain "updated" note in the application's own thread when only
+  // the overview-style fields changed (no need to spell out every field —
+  // the values themselves are right there in the panel); a real
+  // label/status change on the application itself gets its own clearer
+  // line, same as before. Loan and Visa are Task-level only (one per
+  // candidate, not one per university), so they're not handled here.
+  const isFieldSectionUpdate = [caseType, caseStatus, stage, fees, overview, interviewNotes]
+    .some(v => v !== undefined);
+  if (isFieldSectionUpdate) {
+    await logApplicationSystemComment(application.id, application.taskId, req.user.id, `"${updated.label}" details updated.`);
+  }
+  if (label !== undefined || institution !== undefined || program !== undefined || status !== undefined) {
+    await logApplicationSystemComment(application.id, application.taskId, req.user.id, `"${updated.label}" updated${status !== undefined ? ' — status: ' + (status || 'unspecified') : ''}.`);
+  }
   res.json(updated);
 });
 
@@ -761,6 +798,47 @@ router.delete('/applications/:id', requireAuth, async (req, res) => {
   await logActivity(`${application.task.related} — removed "${application.label}".`, req.user.id);
   await logSystemComment(application.taskId, req.user.id, `Application removed: "${application.label}".`);
   res.json({ success: true });
+});
+
+// GET /api/tasks/applications/:id/comments — this one application's own
+// comment thread (Internal/Candidate), separate from the task's general
+// thread. Same shape as GET /:id (task comments), just scoped down.
+router.get('/applications/:id/comments', requireAuth, async (req, res) => {
+  const application = await prisma.application.findUnique({ where: { id: req.params.id } });
+  if (!application) return res.status(404).json({ error: 'Application not found.' });
+  const comments = await prisma.comment.findMany({
+    where: { applicationId: application.id },
+    orderBy: { createdAt: 'asc' },
+    include: { author: { select: { id: true, fullName: true } } },
+  });
+  res.json(comments);
+});
+
+// GET /api/tasks/applications/:id/comments/export — plain-text download,
+// same format as the task/lead/partner comments export.
+router.get('/applications/:id/comments/export', requireAuth, async (req, res) => {
+  const application = await prisma.application.findUnique({
+    where: { id: req.params.id },
+    include: {
+      task: true,
+      comments: { orderBy: { createdAt: 'desc' }, include: { author: { select: { fullName: true } } } },
+    },
+  });
+  if (!application) return res.status(404).json({ error: 'Application not found.' });
+  const heading = `Comments — ${application.label} (${application.institution || 'institution TBD'}) — ${application.task.related}`;
+  const lines = [heading, '='.repeat(50), ''];
+  application.comments.forEach(c => {
+    const ts = c.createdAt.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const who = (c.author && c.author.fullName) || (c.isSystem ? 'System' : 'Unknown');
+    const tags = [c.isSystem ? 'automatic' : null, c.channel === 'CANDIDATE_FACING' ? 'sent to candidate' : 'internal only'].filter(Boolean).join(', ');
+    lines.push(`[${ts} — ${who}${tags ? ' — ' + tags : ''}]`);
+    lines.push(c.text || '(attachment only)');
+    lines.push('');
+  });
+  if (!application.comments.length) lines.push('No comments on record.');
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="comments-${application.task.taskNumber || application.taskId}-${application.label.replace(/[^a-z0-9]+/gi, '-')}.txt"`);
+  res.send(lines.join('\n'));
 });
 
 // PATCH /api/tasks/:id/reference — Admin/Super Admin only. For when the
@@ -1024,7 +1102,7 @@ router.get('/:id/comments/export', requireAuth, async (req, res) => {
 // latter attempts a real email to the candidate right away, same as a
 // chat message, not just an internal note.
 router.post('/:id/comments', requireAuth, async (req, res) => {
-  const { text, attachmentUrl, attachmentName, channel, sendEmail, applicationUpdateFields, applicationUpdateStatus, applicationUpdateCommentTitle, applicationUpdateCommentBody } = req.body;
+  const { text, attachmentUrl, attachmentName, channel, sendEmail, applicationUpdateFields, applicationUpdateStatus, applicationUpdateCommentTitle, applicationUpdateCommentBody, applicationId } = req.body;
   if (!text) return res.status(400).json({ error: 'text is required.' });
   const task = await prisma.task.findUnique({ where: { id: req.params.id } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
@@ -1040,8 +1118,18 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
   // there's no "internal note" concept from their side.
   const resolvedChannel = isStudentAuthor ? 'CANDIDATE_FACING' : (channel === 'CANDIDATE_FACING' ? 'CANDIDATE_FACING' : 'INTERNAL');
 
+  // Optional: this comment belongs to one specific application (one
+  // university) under the task, not the task's general thread. Verified
+  // to actually belong to this task so a stray/other-task id can't be
+  // used to write into the wrong application's thread.
+  let application = null;
+  if (applicationId) {
+    application = await prisma.application.findFirst({ where: { id: applicationId, taskId: task.id } });
+    if (!application) return res.status(400).json({ error: 'That application was not found on this task.' });
+  }
+
   const comment = await prisma.comment.create({
-    data: { taskId: task.id, authorId: req.user.id, text, attachmentUrl: attachmentUrl || null, attachmentName: attachmentName || null, channel: resolvedChannel },
+    data: { taskId: task.id, applicationId: application ? application.id : null, authorId: req.user.id, text, attachmentUrl: attachmentUrl || null, attachmentName: attachmentName || null, channel: resolvedChannel },
     include: { author: { select: { id: true, fullName: true } } }
   });
 
@@ -1059,7 +1147,11 @@ router.post('/:id/comments', requireAuth, async (req, res) => {
     try {
       mailResult = await sendMail({
         to: task.contactEmail,
-        subject: applicationUpdateFields ? `Application Update — ${task.related}` : `Message from Dream2Fly regarding ${task.related}`,
+        subject: applicationUpdateFields
+          ? `Application Update — ${task.related}`
+          : application
+            ? `Update on your application — ${application.institution || application.label} (${task.related})`
+            : `Message from Dream2Fly regarding ${task.related}`,
         body: text,
         attachmentFileName: attachmentName || undefined,
         attachmentBase64: attachmentUrl || undefined,
