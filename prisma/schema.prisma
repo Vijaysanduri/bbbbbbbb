@@ -614,7 +614,6 @@ model Lead {
   // the lead has been handed to a real employee.
   referredByPartnerId String?
   referredByPartner   User?   @relation("PartnerReferral", fields: [referredByPartnerId], references: [id])
-  referredByPartnerNameManual String?
 
   // Call-outcome tracking — set every time an employee logs a follow-up,
   // so leads can be filtered by "what happened last time we called them"
@@ -869,6 +868,13 @@ model Comment {
   lead      Lead?    @relation(fields: [leadId], references: [id], onDelete: Cascade)
   taskId    String?
   task      Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  // When set, this comment belongs to one specific Application under the
+  // task (one university), not the task's general thread — taskId is
+  // still set alongside it (an Application always belongs to a Task), so
+  // existing taskId-based queries keep working; applicationId is what the
+  // per-application Comments view filters on instead.
+  applicationId String?
+  application   Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   // Extends this same comment/activity-log system to Channel Partners -
   // named relation since authorId already relates to User, and Prisma
   // needs an explicit name to tell the two apart.
@@ -1614,10 +1620,35 @@ model Application {
   country       String?
   intake        String?
   applicationId String? // the university/agent's own reference number for this specific application
-  status        String? // e.g. "Conditional Offer Received", "Unconditional Offer", "Rejected", "CAS Issued"
+  status        String? // admission/offer status, e.g. "Conditional Offer Received", "Unconditional Offer", "Rejected", "CAS Issued"
   notes         String?  @db.Text
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  // This application's own comment thread (Internal/Candidate, same as a
+  // Task's), separate from the general Task-level thread — so when a
+  // candidate has applied to three universities, each one's back-and-forth
+  // stays with that specific application instead of all mixing into one feed.
+  comments      Comment[]
+
+  // ---- Per-application case-tracking fields, mirroring Task's own fields ----
+  // A candidate can be juggling several applications at once, each at a
+  // completely different point in the pipeline — so Case Type/Status/Stage,
+  // Fees, Overview and Interview Notes are tracked separately per
+  // application. Loan and Visa, by contrast, are one-per-candidate, not
+  // one-per-university (a student takes a single education loan and files
+  // a single visa regardless of how many universities they applied to), so
+  // those deliberately stay Task-level only — see Task.loan*/visa* fields
+  // and Task's own VisaDocument list — and are NOT duplicated here.
+  // Nothing on Task itself changes; existing tasks are backfilled into an
+  // auto-created "Application 1" (see the migration) that carries over
+  // whatever was already on the Task, so this is purely additive.
+  caseType       String? // "Work Visa" | "Student Visa" — same free-text convention as Task.caseType
+  caseStatus     TaskStatus? // this application's own Pending/In Progress/Completed/etc. — separate from `status` above, which is the admission/offer outcome, not the workflow state
+  stage          String? // this application's own case stage (KYC, Documents, Loan, Visa, etc.)
+  fees           String?
+  overview       String?  @db.Text
+  interviewNotes String?  @db.Text
 }
 
 // Documents attached to a task's visa process (visa filing receipt,
@@ -1832,4 +1863,18 @@ model OnboardingFieldDefinition {
 model OnboardingFieldLabel {
   fieldKey String @id // e.g. "fatherName", "bloodGroup" - matches the actual User column name
   label    String
+}
+
+// The editable Channel Partner Agreement wording — a single row (fixed
+// id "default"), since there's only ever one current template. Edited
+// from Channel Partners → ✏️ Edit Agreement Template in admin, no code
+// change needed. generatePartnerAgreementPdf (partnerAgreementPdf.js)
+// falls back to its own hardcoded default wording if this table is
+// empty, so nothing breaks before the first edit is ever saved.
+model PartnerAgreementTemplate {
+  id          String   @id @default("default")
+  introText   String   @db.Text
+  clauses     Json     // [{ "title": "1. Purpose", "text": "..." }, ...]
+  updatedById String?
+  updatedAt   DateTime @updatedAt
 }
