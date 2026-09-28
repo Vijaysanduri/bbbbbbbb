@@ -1096,6 +1096,148 @@ router.get('/:id/comments/export', requireAuth, async (req, res) => {
   res.send(lines.join('\n'));
 });
 
+// GET /api/tasks/:id/export-full — a single plain-text export of
+// everything on this task: Personal Details & Portal Link, Reference
+// Contact, full Case Details (Case Type/Stage/Status/Fees/Overview/
+// Interview Notes), Loan Details, Visa Details (+ document names), every
+// Application with its own fields and its own comment thread, and the
+// general comment thread. Confidential Notes (the legacy field and the
+// dated TaskConfidentialNote entries) are deliberately left out — those
+// already have their own separate, Admin/Super-Admin-only export at
+// /:id/confidential-notes/export. referencePhone is likewise only
+// included for Admin/Super Admin, the same rule already applied to it
+// everywhere else in this file.
+router.get('/:id/export-full', requireAuth, async (req, res) => {
+  const task = await prisma.task.findUnique({
+    where: { id: req.params.id },
+    include: {
+      assignedEmployee: { select: { fullName: true } },
+      student: { select: { fullName: true, email: true } },
+      referredByPartner: { select: { fullName: true } },
+      applications: {
+        orderBy: { createdAt: 'asc' },
+        include: { comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { fullName: true } } } } },
+      },
+      visaDocuments: { select: { fileName: true, uploadedAt: true, uploadedBy: { select: { fullName: true } } }, orderBy: { uploadedAt: 'desc' } },
+      comments: { orderBy: { createdAt: 'asc' }, include: { author: { select: { fullName: true } } } },
+    },
+  });
+  if (!task) return res.status(404).json({ error: 'Task not found.' });
+
+  const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(req.user.role);
+  const lines = [];
+  const rule = () => lines.push('-'.repeat(60));
+  const section = (title) => { lines.push(''); lines.push(title.toUpperCase()); rule(); };
+  const row = (label, value) => lines.push(`${label}: ${(value === null || value === undefined || value === '') ? '—' : value}`);
+  const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+  const fmtDateTime = (d) => d ? new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+  const commentLine = (c) => {
+    const who = (c.author && c.author.fullName) || (c.isSystem ? 'System' : 'Unknown');
+    const tags = [c.isSystem ? 'automatic' : null, c.channel === 'CANDIDATE_FACING' ? 'sent to candidate' : 'internal only'].filter(Boolean).join(', ');
+    return `[${fmtDateTime(c.createdAt)} — ${who}${tags ? ' — ' + tags : ''}] ${c.text || '(attachment only)'}`;
+  };
+
+  lines.push(`FULL TASK EXPORT — TSK-${String(task.taskNumber).padStart(4, '0')} — ${task.related}`);
+  lines.push(`Exported ${fmtDateTime(new Date())} by ${req.user.fullName || req.user.email}`);
+  rule();
+
+  section('Personal Details & Portal Link');
+  row('Candidate Name', task.related);
+  row('Country', task.country);
+  row('Contact Phone', task.contactPhone);
+  row('Contact Email', task.contactEmail);
+  row('Assigned To', task.assignedEmployee ? task.assignedEmployee.fullName : 'Unassigned');
+  row('Priority', task.priority);
+  row('Due Date', fmtDate(task.due));
+  row('Student Portal Account', task.studentId ? `Linked (${task.student ? task.student.email : ''})` : 'Not linked');
+  row('Referred By', task.referredByPartner ? task.referredByPartner.fullName : (task.referredByPartnerNameManual || '—'));
+
+  section('Reference Contact');
+  row('Reference Name', task.referenceName);
+  if (isAdmin) row('Reference Phone', task.referencePhone);
+
+  section('Case Details');
+  row('Case Type', task.caseType);
+  row('Case Stage', task.stage);
+  row('Status', task.status);
+  row('Course', task.course);
+  row('College / University', task.college);
+  row('Application Id', task.applicationId);
+  row('Intake', task.intake);
+  row('Fees', task.fees);
+  lines.push('');
+  lines.push('Overview / Additional Notes:');
+  lines.push(task.overview || '—');
+  lines.push('');
+  lines.push('Interview Notes:');
+  lines.push(task.interviewNotes || '—');
+
+  section('Loan Details');
+  row('Bank Name', task.loanBankName);
+  row('Loan Status', task.loanStatus);
+  row("Bank Official's Name", task.loanOfficialName);
+  row("Bank Official's Contact", task.loanOfficialContact);
+  row('Loan Amount', task.loanAmount);
+  row('Loan Reference Number', task.loanReferenceNumber);
+  lines.push('Notes: ' + (task.loanNotes || '—'));
+
+  section('Visa Details');
+  row('Visa Type', task.visaType);
+  row('Visa Reference Number', task.visaReferenceNumber);
+  row('Filed Date', fmtDate(task.visaFiledDate));
+  row('Approved Date', fmtDate(task.visaApprovedDate));
+  row('Visa Agent Name', task.visaAgentName);
+  row('Visa Agent Phone', task.visaAgentPhone);
+  lines.push('Notes: ' + (task.visaNotes || '—'));
+  lines.push('');
+  lines.push('Visa Documents:');
+  if (task.visaDocuments.length) {
+    task.visaDocuments.forEach(d => lines.push(`  - ${d.fileName} (uploaded ${fmtDateTime(d.uploadedAt)} by ${d.uploadedBy ? d.uploadedBy.fullName : 'Unknown'})`));
+  } else {
+    lines.push('  (none uploaded)');
+  }
+
+  section(`Applications (${task.applications.length})`);
+  if (!task.applications.length) {
+    lines.push('No applications tracked yet.');
+  }
+  task.applications.forEach((a, i) => {
+    lines.push('');
+    lines.push(`[Application ${i + 1}] ${a.label}`);
+    row('  Status', a.status);
+    row('  Institution', a.institution);
+    row('  Program', a.program);
+    row('  Country', a.country);
+    row('  Intake', a.intake);
+    row('  Application Id', a.applicationId);
+    row('  Case Type', a.caseType);
+    row('  Case Status', a.caseStatus);
+    row('  Case Stage', a.stage);
+    row('  Fees', a.fees);
+    lines.push('  Overview: ' + (a.overview || '—'));
+    lines.push('  Interview Notes: ' + (a.interviewNotes || '—'));
+    lines.push('  Notes: ' + (a.notes || '—'));
+    lines.push(`  Comments (${a.comments.length}):`);
+    if (a.comments.length) {
+      a.comments.forEach(c => lines.push('    ' + commentLine(c)));
+    } else {
+      lines.push('    (none)');
+    }
+  });
+
+  section('General Comments (not tied to a specific application)');
+  const generalComments = task.comments.filter(c => !c.applicationId);
+  if (generalComments.length) {
+    generalComments.forEach(c => lines.push(commentLine(c)));
+  } else {
+    lines.push('No general comments on record.');
+  }
+
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="task-export-${task.taskNumber || task.id}.txt"`);
+  res.send(lines.join('\n'));
+});
+
 // POST /api/tasks/:id/comments
 // Body: { text, attachmentUrl?, attachmentName?, channel? }
 // channel: 'INTERNAL' (default, staff-only) or 'CANDIDATE_FACING' — the
