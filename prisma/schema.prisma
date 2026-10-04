@@ -1448,6 +1448,12 @@ model SignableDocument {
   createdById   String?
   createdBy     User?    @relation(fields: [createdById], references: [id])
   createdAt     DateTime @default(now())
+  version           Int      @default(1)
+  groupKey          String?
+  isCurrentVersion  Boolean  @default(true)
+  previousVersionId String?  @unique
+  previousVersion   SignableDocument?  @relation("SignableDocumentVersionChain", fields: [previousVersionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  nextVersion       SignableDocument?  @relation("SignableDocumentVersionChain")
   acknowledgments SignableDocumentAck[]
 }
 
@@ -1877,4 +1883,21 @@ model PartnerAgreementTemplate {
   clauses     Json     // [{ "title": "1. Purpose", "text": "..." }, ...]
   updatedById String?
   updatedAt   DateTime @updatedAt
+}
+
+// Single-row (id="main") table for a small set of admin-only operational
+// settings — currently just the two destination emails for Confidential
+// Notes alerts and the monthly Tasks+Leads backup export. Deliberately a
+// separate table from SiteContent, since SiteContent's GET is public
+// (no auth — the public website reads it directly) and these values must
+// never be exposed that way. lastMonthlyBackupAt lets the backup
+// scheduler self-throttle to "once a month" using the same
+// check-daily-only-act-when-due pattern as the existing reminder
+// schedulers, rather than needing a real cron library.
+model AdminSetting {
+  id                           String    @id @default("main")
+  confidentialNotesAlertEmail  String?
+  monthlyBackupEmail           String?
+  lastMonthlyBackupAt          DateTime?
+  updatedAt                    DateTime  @updatedAt
 }
