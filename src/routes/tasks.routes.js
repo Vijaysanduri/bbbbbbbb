@@ -915,6 +915,40 @@ router.post('/:id/confidential-notes/entries', requireAuth, requireRole('ADMIN',
   });
   await logActivity(`${task.related} — confidential note added.`, req.user.id);
   res.status(201).json(entry);
+
+  // Fire-and-forget alert email — never blocks or fails the save. Only
+  // sends when an admin has set a destination address in Settings.
+  // Shows the FULL confidential-note history for this task, not just the
+  // one that was just added — the newest entry (the one that triggered
+  // this email) is clearly marked, but every earlier note is included
+  // too, so whoever reads the alert has full context without having to
+  // separately open the task.
+  (async () => {
+    try {
+      const settings = await prisma.adminSetting.findUnique({ where: { id: 'main' } });
+      const alertTo = settings && settings.confidentialNotesAlertEmail;
+      if (!alertTo) return;
+      const authorName = (entry.author && entry.author.fullName) || 'An admin';
+      const allEntries = await prisma.taskConfidentialNote.findMany({
+        where: { taskId: task.id },
+        include: { author: { select: { fullName: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+      const historyText = allEntries.map(e => {
+        const isNew = e.id === entry.id;
+        const who = (e.author && e.author.fullName) || 'An admin';
+        const when = new Date(e.createdAt).toLocaleString();
+        return (isNew ? '>>> NEW — just added <<<\n' : '') + `${when} — ${who}\n${e.text}`;
+      }).join('\n\n----------------------------------------\n\n');
+      await sendMail({
+        to: alertTo,
+        subject: `Confidential note added — ${task.related}`,
+        body: `${authorName} added a confidential note on "${task.related}".\n\nFull confidential note history for this task (most recent first, newest marked):\n\n${historyText}`,
+      });
+    } catch (err) {
+      console.error('confidential-notes alert email failed:', err);
+    }
+  })();
 });
 
 // GET /api/tasks/:id/confidential-notes/entries — Admin/Super Admin
