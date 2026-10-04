@@ -4,10 +4,7 @@ require('express-async-errors');
 const cors = require('cors');
 
 const authRoutes = require('./routes/auth.routes');
-const dashboardRoutes = require('./routes/dashboard.routes');
 const leadsRoutes = require('./routes/leads.routes');
-const partnerProfileRoutes = require('./routes/partnerProfile.routes');
-const commentsRoutes = require('./routes/comments.routes');
 const tasksRoutes = require('./routes/tasks.routes');
 const featureFlagsRoutes = require('./routes/featureFlags.routes');
 const attendanceRoutes = require('./routes/attendance.routes');
@@ -16,10 +13,6 @@ const infoDocumentsRoutes = require('./routes/infoDocuments.routes');
 const emailTemplatesRoutes = require('./routes/emailTemplates.routes');
 const careerApplicationsRoutes = require('./routes/careerApplications.routes');
 const taskStagesRoutes = require('./routes/taskStages.routes');
-const countriesRoutes = require('./routes/countries.routes');
-const servicesRoutes = require('./routes/services.routes');
-const caseTypesRoutes = require('./routes/caseTypes.routes');
-const loanStatusesRoutes = require('./routes/loanStatuses.routes');
 const mediaRoutes = require('./routes/media.routes');
 const themeRoutes = require('./routes/theme.routes');
 const documentTemplatesRoutes = require('./routes/documentTemplates.routes');
@@ -45,10 +38,9 @@ const activityLogRoutes = require('./routes/activityLog.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const studentDocsRoutes = require('./routes/studentDocs.routes');
 const promotionsRoutes = require('./routes/promotions.routes');
-const scheduledPromotionsRoutes = require('./routes/scheduledPromotions.routes');
 const paymentsRoutes = require('./routes/payments.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
-const partnerAgreementTemplateRoutes = require('./routes/partnerAgreementTemplate.routes');
+const adminSettingsRoutes = require('./routes/adminSettings.routes');
 
 const app = express();
 app.set('trust proxy', 1); // Railway sits behind a proxy — needed so req.ip is the real client, not the proxy, which matters for rate limiting below
@@ -86,10 +78,7 @@ app.use((req, res, next) => {
 app.get('/api/health', (req, res) => res.json({ status: 'ok', service: 'dream2fly-backend' }));
 
 app.use('/api/auth', authRoutes);
-app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/leads', leadsRoutes);
-app.use('/api/partner-profile', partnerProfileRoutes);
-app.use('/api/comments', commentsRoutes);
 app.use('/api/tasks', tasksRoutes);
 app.use('/api/feature-flags', featureFlagsRoutes);
 app.use('/api/attendance', attendanceRoutes);
@@ -98,10 +87,6 @@ app.use('/api/info-documents', infoDocumentsRoutes);
 app.use('/api/email-templates', emailTemplatesRoutes);
 app.use('/api/career-applications', careerApplicationsRoutes);
 app.use('/api/task-stages', taskStagesRoutes);
-app.use('/api/countries', countriesRoutes);
-app.use('/api/services', servicesRoutes);
-app.use('/api/case-types', caseTypesRoutes);
-app.use('/api/loan-statuses', loanStatusesRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/theme', themeRoutes);
 app.use('/api/document-templates', documentTemplatesRoutes);
@@ -127,10 +112,9 @@ app.use('/api/activity-log', activityLogRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/student-docs', studentDocsRoutes);
 app.use('/api/promotions', promotionsRoutes);
-app.use('/api/scheduled-promotions', scheduledPromotionsRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/notifications', notificationsRoutes);
-app.use('/api/partner-agreement-template', partnerAgreementTemplateRoutes);
+app.use('/api/admin-settings', adminSettingsRoutes);
 
 // Centralized error handler — keeps stack traces out of API responses.
 // Now also writes every error to the ErrorLog table (in addition to the
@@ -178,8 +162,9 @@ app.listen(PORT, () => {
   // once a day (cheap, no-op most days) and only actually sends once 7+
   // days have passed since someone's last reminder, so it naturally
   // staggers correctly regardless of when the server happens to restart.
-  const { startDailyScheduler } = require('./utils/scheduler');
-  startDailyScheduler();
+  const { runScheduledReminders } = require('./utils/scheduler');
+  setInterval(runScheduledReminders, 24 * 60 * 60 * 1000);
+  setTimeout(runScheduledReminders, 60 * 1000); // give the server a minute to settle before the first check
 
   // One-time starter set for the candidate-email "Quick template" library
   // — only runs if the table is empty, so this never overwrites templates
