@@ -1,9 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
-const { sendMail, wrapPromotionEmailHtml } = require('./mailer');
-const { sendWhatsApp } = require('./whatsapp');
-const { createNotification } = require('./notifications');
-const { TOKEN_LIFETIME_MS, sessionEffectiveEnd } = require('./sessionHelpers');
-const { logPartnerComment } = require('./partnerCommentLog');
+const { sendMail } = require('./mailer');
 
 const prisma = new PrismaClient();
 
@@ -11,14 +7,6 @@ const REMINDER_INTERVAL_DAYS = 7;
 
 function daysAgo(days) {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-}
-
-// Small pause between each email in a batch loop — on top of the retry
-// logic in mailer.js, this reduces how often a large daily batch (many
-// candidates going stale on the same day) trips a rate limit in the
-// first place, rather than just recovering after the fact.
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // Weekly reminders for anyone who still hasn't signed/uploaded an active
@@ -54,48 +42,12 @@ async function sendOverdueDocumentReminders() {
     } catch (err) {
       console.error('Scheduled document reminder failed for', ack.user.email, err.message);
     }
-    await sleep(300);
   }
   if (overdue.length) console.log(`[scheduler] Sent ${overdue.length} document signing reminder(s).`);
 }
 
 // Weekly reminders for students with an unpaid fee — reuses the same
 // "hasn't acted in 7+ days" pattern as document reminders above.
-// Weekly reminders for Channel Partners who haven't finished their
-// profile yet — same reasoning and cadence as the document-signing
-// reminder above (a week's grace before the first nag, then weekly
-// after that), since their Agreement can't be generated without it.
-async function sendPartnerProfileReminders() {
-  const cutoff = daysAgo(REMINDER_INTERVAL_DAYS);
-  const incomplete = await prisma.partnerProfile.findMany({
-    where: {
-      submittedAt: null,
-      OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: cutoff } }],
-    },
-    include: { user: true },
-  });
-
-  for (const profile of incomplete) {
-    if (!profile.user || profile.user.role !== 'CHANNEL_PARTNER') continue;
-    if (!profile.lastReminderAt && profile.createdAt > cutoff) continue; // same week-of-grace as document reminders
-    try {
-      await sendMail({
-        to: profile.user.email,
-        subject: `Reminder: please complete your Channel Partner profile`,
-        body: `Hi ${profile.user.fullName},\n\nYour profile still needs a few details before we can send your Channel Partner Agreement — please complete it from your portal.\n\nBest,\nDream2Fly Team`,
-      });
-      await prisma.partnerProfile.update({
-        where: { id: profile.id },
-        data: { reminderCount: { increment: 1 }, lastReminderAt: new Date() },
-      });
-      await logPartnerComment(profile.userId, 'Automated weekly reminder email sent (profile still incomplete).');
-    } catch (err) {
-      console.error('Scheduled partner profile reminder failed for', profile.user.email, err.message);
-    }
-  }
-  if (incomplete.length) console.log(`[scheduler] Sent ${incomplete.length} partner profile completion reminder(s).`);
-}
-
 async function sendOverduePaymentReminders() {
   const cutoff = daysAgo(REMINDER_INTERVAL_DAYS);
   const overdue = await prisma.payment.findMany({
@@ -113,356 +65,17 @@ async function sendOverduePaymentReminders() {
     } catch (err) {
       console.error('Scheduled payment reminder failed for', payment.student.email, err.message);
     }
-    await sleep(300);
   }
   if (overdue.length) console.log(`[scheduler] Sent ${overdue.length} payment reminder(s).`);
-}
-
-// Daily safety net for students, with a deliberate ceiling.
-//
-// DAY 1 stale (no genuine candidate-facing update in 24h): resend the
-// last real update to the candidate, and notify the assigned employee
-// that this happened on their behalf — they need to send a real one.
-//
-// DAY 2+ stale: does NOT send the candidate a second automatic email.
-// Repeating the same "nothing's changed" message would read as "nobody
-// is actually working on my case," which is worse than silence. Instead
-// this escalates to Admin/Super Admin — the assigned employee may be on
-// leave or otherwise unavailable, and someone needs to step in. Admin
-// gets re-alerted once per day for as long as it stays stale, same
-// cadence as the existing document/payment reminders below.
-//
-// Skips entirely on a day your team has marked as an office holiday —
-// nobody should be flagged as having "missed" an update on a day off.
-//
-// Only ever looks at CANDIDATE_FACING comments when deciding what
-// counts as "an update was sent" or what to resend — internal staff
-// notes are never counted and never leaked to a candidate.
-async function sendStaleTaskUpdateReminders() {
-  const now = new Date();
-  const oneDayCutoff = daysAgo(1);
-  const twoDayCutoff = daysAgo(2);
-
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
-  const todaysHoliday = await prisma.holiday.findFirst({ where: { date: { gte: todayStart, lt: todayEnd } } });
-  if (todaysHoliday) {
-    console.log(`[scheduler] Skipping stale-task-update check — today (${todaysHoliday.name}) is an office holiday.`);
-    return;
-  }
-
-  const firstStage = await prisma.taskStageOption.findFirst({ where: { active: true }, orderBy: { order: 'asc' } });
-
-  const activeTasks = await prisma.task.findMany({
-    where: { studentId: { not: null }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DUPLICATED', 'ON_HOLD'] } },
-    include: {
-      student: true,
-      assignedEmployee: true,
-      comments: { where: { channel: 'CANDIDATE_FACING' }, orderBy: { createdAt: 'desc' }, take: 30 },
-    },
-  });
-
-  let candidateReminderCount = 0;
-  let escalationCount = 0;
-
-  for (const task of activeTasks) {
-    if (!task.student || !task.student.email) continue;
-    // A case still sitting at the very first stage hasn't genuinely
-    // started yet — the only "update" it has is likely just the initial
-    // welcome/acknowledgment. Re-sending that a day later as if it were
-    // a status update reads as broken to the candidate ("thanks for
-    // reaching out" repeated back to them days later). Wait until the
-    // case has actually moved into real work before this applies.
-    if (firstStage && task.stage === firstStage.name) continue;
-    const genuineUpdates = task.comments.filter(c => !c.isSystem);
-    // A single message is someone's first hello to the candidate, not a
-    // status update — nothing has actually happened yet to "resend."
-    // Only once there's a second real message does it become fair to
-    // say "here's where things stand" if a day goes by with no third.
-    if (genuineUpdates.length < 2) continue;
-    const lastGenuine = genuineUpdates[0];
-    const reminderAlreadySentForThisStretch = task.comments.find(c => c.isSystem && c.createdAt > lastGenuine.createdAt);
-
-    if (!reminderAlreadySentForThisStretch) {
-      // ---- DAY 1: one candidate reminder, one employee notification ----
-      if (lastGenuine.createdAt > oneDayCutoff) continue; // still fresh
-      try {
-        await sendMail({
-          to: task.student.email,
-          subject: `Update on your application — ${task.related}`,
-          body: `Hi ${task.student.fullName},\n\nWe don't have a brand-new update since our last message, but wanted to keep you posted — here's where things currently stand:\n\n"${lastGenuine.text}"\n\nWe'll be in touch the moment anything changes.\n\nBest,\nDream2Fly Team`,
-        });
-        await prisma.comment.create({
-          data: {
-            taskId: task.id, isSystem: true, channel: 'CANDIDATE_FACING',
-            text: `[Automatic daily reminder — no new update was sent, so the previous one was resent]\n${lastGenuine.text}`,
-          },
-        });
-        candidateReminderCount++;
-        if (task.assignedEmployeeId) {
-          await createNotification(
-            task.assignedEmployeeId,
-            'You missed sending an update',
-            `${task.related} didn't get an update from you yesterday — an automatic reminder was sent on your behalf. Please follow up with a real update today.`,
-            'MISSED_UPDATE', 'tasks'
-          );
-        } else {
-          // Nobody's actually assigned to this case at all — that's a
-          // bigger problem than a busy employee, so this goes straight
-          // to Admin on day 1 rather than waiting for day 2.
-          const admins = await prisma.user.findMany({ where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, active: true } });
-          for (const admin of admins) {
-            await createNotification(admin.id, `${task.related}'s case is unassigned`, 'This case just went a full day with no update and has nobody assigned to it — please assign someone.', 'STALE_CASE_ESCALATION', 'tasks');
-          }
-        }
-      } catch (err) {
-        console.error('Scheduled stale-task-update reminder failed for', task.student.email, err.message);
-        // Retries in sendMail already handle a brief hiccup — reaching
-        // this point means it failed persistently (e.g. a genuinely bad
-        // email address, or an outage longer than the retry window).
-        // That should never fail completely silently — someone needs
-        // to know so they can follow up with the candidate another way.
-        const notifyTarget = task.assignedEmployeeId
-          ? [task.assignedEmployeeId]
-          : (await prisma.user.findMany({ where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, active: true } })).map(a => a.id);
-        for (const userId of notifyTarget) {
-          await createNotification(
-            userId,
-            `Couldn't send an update to ${task.related}`,
-            `The automatic reminder email failed to send (${err.message}). Please check their email address and follow up directly.`,
-            'EMAIL_SEND_FAILED', 'tasks'
-          ).catch(() => {}); // never let a notification failure mask the original error
-        }
-      }
-      await sleep(300);
-      continue;
-    }
-
-    // ---- DAY 2+: no further candidate emails — escalate internally ----
-    if (lastGenuine.createdAt > twoDayCutoff) continue;
-    const alreadyEscalatedToday = await prisma.comment.findFirst({
-      where: { taskId: task.id, channel: 'INTERNAL', isSystem: true, text: { startsWith: '[Automatic escalation]' }, createdAt: { gt: oneDayCutoff } },
-    });
-    if (alreadyEscalatedToday) continue;
-    const daysStale = Math.floor((now - lastGenuine.createdAt) / (24 * 60 * 60 * 1000));
-    const admins = await prisma.user.findMany({ where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, active: true } });
-    for (const admin of admins) {
-      await createNotification(
-        admin.id,
-        `${task.related} hasn't been updated in ${daysStale} days`,
-        `${task.assignedEmployee ? task.assignedEmployee.fullName : 'The assigned employee'} may be unavailable (e.g. on leave) — this case needs attention.`,
-        'STALE_CASE_ESCALATION', 'tasks'
-      );
-    }
-    await prisma.comment.create({
-      data: { taskId: task.id, isSystem: true, channel: 'INTERNAL', text: `[Automatic escalation] No candidate update in ${daysStale} days — leadership notified.` },
-    });
-    escalationCount++;
-  }
-  if (candidateReminderCount) console.log(`[scheduler] Sent ${candidateReminderCount} stale task update reminder(s) to candidates.`);
-  if (escalationCount) console.log(`[scheduler] Escalated ${escalationCount} stale case(s) to leadership.`);
 }
 
 async function runScheduledReminders() {
   try {
     await sendOverdueDocumentReminders();
     await sendOverduePaymentReminders();
-    await sendStaleTaskUpdateReminders();
-    await sendPartnerProfileReminders();
   } catch (err) {
     console.error('[scheduler] Reminder run failed:', err.message);
   }
 }
 
-// The automatic candidate email specifically needs to go out AFTER the
-// team's workday ends (6pm) — sending it earlier risks it going out
-// while an employee still had time to send a real update themselves
-// that day. 7pm gives a one-hour buffer past end of day.
-//
-// IMPORTANT — timezone assumption: this assumes Asia/Kolkata (IST).
-// Guessed from the +91 phone number used throughout this app; if
-// Dream2Fly's actual working hours run on a different clock (e.g. the
-// .co.uk side of the business), change SCHEDULE_TIMEZONE below — this
-// is the one place that needs updating.
-const SCHEDULE_TIMEZONE = 'Asia/Kolkata';
-const SCHEDULE_HOUR = 19; // 7pm, 24-hour format
-
-function currentHourInScheduleTimezone() {
-  return parseInt(new Intl.DateTimeFormat('en-US', { timeZone: SCHEDULE_TIMEZONE, hour: 'numeric', hour12: false }).format(new Date()), 10);
-}
-function currentDateKeyInScheduleTimezone() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: SCHEDULE_TIMEZONE }).format(new Date()); // en-CA formats as YYYY-MM-DD
-}
-
-// Tracked in memory, not the database — deliberately. A server restart
-// resetting this and causing a second run on the same day is a
-// harmless, wasteful re-check, not a real bug: every individual
-// reminder function above (sendStaleTaskUpdateReminders, the document
-// and payment reminders) already checks the database for whether IT
-// specifically already sent, per task/document/payment, before doing
-// anything — so a duplicate outer trigger can never actually cause a
-// duplicate email. This just avoids the (harmless) extra work in the
-// common case.
-let lastRunDateKey = null;
-
-// Writes a real logoutAt for any session that's expired but was never
-// explicitly closed — someone who left the company or just stopped
-// using the portal, with no future login to trigger the cleanup that
-// already happens on re-login. Runs every 5 minutes (piggybacking on
-// the same interval as the 7pm check below, but independent of that
-// once-daily gate — this needs to run continuously through the day, not
-// just once). The read-time cap in sessionHelpers.js already makes any
-// query correct even in the few minutes before this catches up, so this
-// is about keeping the stored data itself clean, not about correctness.
-async function finalizeExpiredLoginSessions() {
-  const cutoff = new Date(Date.now() - TOKEN_LIFETIME_MS);
-  const staleOpenSessions = await prisma.loginSession.findMany({
-    where: { logoutAt: null, loginAt: { lt: cutoff } },
-  });
-  for (const session of staleOpenSessions) {
-    await prisma.loginSession.update({
-      where: { id: session.id },
-      data: { logoutAt: sessionEffectiveEnd(session) },
-    });
-  }
-  if (staleOpenSessions.length) console.log(`[scheduler] Finalized ${staleOpenSessions.length} expired login session(s).`);
-}
-
-// Resolves a scheduled campaign's recipientSource to an actual, current
-// list of people — fetched fresh every time this fires, not a snapshot
-// from when the campaign was created, so someone who joined yesterday
-// still gets tomorrow's scheduled email.
-async function fetchScheduledPromotionRecipients(recipientSource) {
-  const roleMap = { CHANNEL_PARTNER: 'CHANNEL_PARTNER', STUDENT: 'STUDENT', EMPLOYEE: 'EMPLOYEE' };
-  const role = roleMap[recipientSource];
-  if (!role) return [];
-  const users = await prisma.user.findMany({ where: { role, active: true }, select: { fullName: true, email: true, phone: true } });
-  return users.map(u => ({ name: u.fullName, email: u.email, phone: u.phone }));
-}
-
-function extractScheduleParts(scheduledAt) {
-  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: SCHEDULE_TIMEZONE, hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short', day: 'numeric' });
-  const parts = fmt.formatToParts(scheduledAt);
-  const get = (type) => parts.find(p => p.type === type).value;
-  return { hour: parseInt(get('hour'), 10) % 24, minute: parseInt(get('minute'), 10), weekday: get('weekday'), dayOfMonth: parseInt(get('day'), 10) };
-}
-function currentScheduleParts() {
-  return extractScheduleParts(new Date());
-}
-
-// Whether a given campaign should fire right now, checked every 5
-// minutes. Deliberately conservative — anything not clearly due yet
-// returns false, since a missed 5-minute window just gets caught on
-// the next poll, but firing early or twice would mean an unwanted
-// duplicate send.
-function isPromotionDue(promo, now) {
-  const sched = extractScheduleParts(promo.scheduledAt);
-  const cur = currentScheduleParts();
-  const todayKey = currentDateKeyInScheduleTimezone();
-  const lastSentKey = promo.lastSentAt ? new Intl.DateTimeFormat('en-CA', { timeZone: SCHEDULE_TIMEZONE }).format(promo.lastSentAt) : null;
-  const pastScheduledTimeToday = (cur.hour > sched.hour) || (cur.hour === sched.hour && cur.minute >= sched.minute);
-
-  if (promo.frequency === 'ONCE') {
-    return !promo.lastSentAt && now >= promo.scheduledAt;
-  }
-  if (lastSentKey === todayKey) return false; // already fired today — recurring campaigns fire at most once per day
-  if (promo.frequency === 'DAILY') {
-    return pastScheduledTimeToday;
-  }
-  if (promo.frequency === 'WEEKLY') {
-    return cur.weekday === sched.weekday && pastScheduledTimeToday;
-  }
-  if (promo.frequency === 'MONTHLY') {
-    // If scheduled for a day past the end of a shorter month (e.g. the
-    // 31st in a 30-day month), treat it as due on that month's last day.
-    const daysInCurrentMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-    const effectiveDay = Math.min(sched.dayOfMonth, daysInCurrentMonth);
-    return cur.dayOfMonth === effectiveDay && pastScheduledTimeToday;
-  }
-  if (promo.frequency === 'CUSTOM_DAYS') {
-    if (now < promo.scheduledAt) return false; // hasn't reached its first fire time yet
-    if (!promo.lastSentAt) return true; // reached its first fire time, never sent before
-    // Comparing date-only keys (not raw millisecond timestamps) avoids
-    // the day count being thrown off by a daylight-saving shift landing
-    // between two sends.
-    const daysSince = Math.round((new Date(todayKey) - new Date(lastSentKey)) / 86400000);
-    return daysSince >= (promo.intervalDays || 1);
-  }
-  return false;
-}
-
-async function runScheduledPromotions() {
-  const now = new Date();
-  const active = await prisma.scheduledPromotion.findMany({ where: { active: true } });
-  for (const promo of active) {
-    if (!isPromotionDue(promo, now)) continue;
-    try {
-      const recipients = await fetchScheduledPromotionRecipients(promo.recipientSource);
-      const wantsEmail = !promo.channel || promo.channel === 'email' || promo.channel === 'both';
-      const wantsWhatsApp = promo.channel === 'whatsapp' || promo.channel === 'both';
-      let emailsSent = 0, whatsappSent = 0;
-      for (const r of recipients) {
-        if (wantsEmail && r.email) {
-          try {
-            const personalizedBody = promo.body.replace(/\{name\}/g, r.name || 'there');
-            await sendMail({
-              to: r.email, subject: promo.subject, body: personalizedBody,
-              attachmentFileName: promo.attachmentFileName || undefined,
-              attachmentBase64: promo.attachmentBase64 || undefined,
-              customHtml: wrapPromotionEmailHtml(promo.subject, personalizedBody, promo.imageUrl || null, promo.ctaText || null, promo.ctaUrl || null),
-            });
-            emailsSent++;
-          } catch (err) { /* one bad address shouldn't stop the batch */ }
-        }
-        if (wantsWhatsApp && r.phone) {
-          try {
-            await sendWhatsApp({ to: r.phone, message: promo.body.replace(/\{name\}/g, r.name || 'there') });
-            whatsappSent++;
-          } catch (err) { /* same — keep going */ }
-        }
-      }
-      await prisma.scheduledPromotion.update({
-        where: { id: promo.id },
-        data: { lastSentAt: now, ...(promo.frequency === 'ONCE' ? { active: false } : {}) },
-      });
-      // Logged into the same history table the manual Promotions page
-      // uses, so scheduled and manual sends show up together in one
-      // place rather than needing two separate history views.
-      await prisma.promotion.create({
-        data: {
-          subject: promo.subject, body: promo.body, recipientSource: promo.recipientSource,
-          recipientCount: recipients.length, emailsSent, whatsappSent, sentById: promo.createdById,
-        },
-      });
-      console.log(`[scheduler] Scheduled promotion "${promo.subject}" sent — ${emailsSent} email(s), ${whatsappSent} WhatsApp message(s).`);
-    } catch (err) {
-      console.error(`[scheduler] Scheduled promotion "${promo.subject}" failed:`, err.message);
-    }
-  }
-}
-
-function startDailyScheduler() {
-  async function check() {
-    const hour = currentHourInScheduleTimezone();
-    const todayKey = currentDateKeyInScheduleTimezone();
-    if (hour >= SCHEDULE_HOUR && lastRunDateKey !== todayKey) {
-      lastRunDateKey = todayKey;
-      console.log(`[scheduler] Running daily reminders for ${todayKey} (${SCHEDULE_TIMEZONE} time is currently ${hour}:xx).`);
-      await runScheduledReminders();
-    }
-    try {
-      await finalizeExpiredLoginSessions();
-    } catch (err) {
-      console.error('[scheduler] Finalizing expired login sessions failed:', err.message);
-    }
-    try {
-      await runScheduledPromotions();
-    } catch (err) {
-      console.error('[scheduler] Scheduled promotions run failed:', err.message);
-    }
-  }
-  check(); // covers the case where the server starts after 7pm on a day that hasn't run yet
-  setInterval(check, 5 * 60 * 1000);
-}
-
-module.exports = { runScheduledReminders, startDailyScheduler };
+module.exports = { runScheduledReminders };

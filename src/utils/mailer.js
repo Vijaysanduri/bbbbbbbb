@@ -1,10 +1,7 @@
-// Wraps a plain-text email body in a branded HTML template — the
-// header/footer banner images are hosted on the website, not embedded
-// as base64, so emails stay small and render reliably across mail
-// clients. wrapPromotionEmailHtml uses a richer header-banner.jpg
-// (compressed to ~50KB — the full-resolution source was ~440KB, too
-// heavy for email) alongside the smaller logo-mark.png the other
-// designs below still use.
+// Wraps a plain-text email body in a branded HTML template — the exact
+// same header/footer banner images used on the onboarding documents
+// (hosted on the website, not embedded as base64, so emails stay small
+// and render reliably across mail clients), with the message in between.
 // Plain-text \n\n becomes a new paragraph; single \n becomes a line break.
 // Confirmed via direct fetch: the live site resolves at www.dream2fly.co.uk.
 // Using the non-www version here would mean every image tag in every
@@ -178,51 +175,19 @@ async function sendMail({ to, subject, body, attachmentFileName, attachmentBase6
       content: attachmentBase64.includes(',') ? attachmentBase64.split(',')[1] : attachmentBase64,
     }];
   }
-
-  // Retries only on TRANSIENT failures — a rate limit (429) or the
-  // provider's own server hiccup (500-599). Never retries a 4xx like
-  // "invalid recipient address" or "bad request", since that would just
-  // fail identically every time and only add pointless delay.
-  //
-  // This matters specifically for the daily batch runs (scheduler.js):
-  // without this, one candidate hitting a rate limit mid-batch would
-  // silently fail that email entirely — the case would just look
-  // "not yet updated" and only actually go out the FOLLOWING day's
-  // run, which from the candidate's side looks exactly like a mail
-  // that arrived a day late for no visible reason.
-  const maxAttempts = 3;
-  let lastErr = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    let res;
-    try {
-      res = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-    } catch (networkErr) {
-      lastErr = networkErr;
-      if (attempt < maxAttempts) {
-        await new Promise(r => setTimeout(r, attempt * 1000));
-        continue;
-      }
-      throw networkErr;
-    }
-    if (res.ok) return { delivered: true };
-    const isTransient = res.status === 429 || (res.status >= 500 && res.status < 600);
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
     const errBody = await res.text();
-    lastErr = new Error(`Resend API error (${res.status}): ${errBody}`);
-    if (isTransient && attempt < maxAttempts) {
-      console.warn(`[mailer] Transient error sending to ${to} (attempt ${attempt}/${maxAttempts}, status ${res.status}) — retrying shortly.`);
-      await new Promise(r => setTimeout(r, attempt * 1000));
-      continue;
-    }
-    throw lastErr;
+    throw new Error(`Resend API error (${res.status}): ${errBody}`);
   }
-  throw lastErr;
+  return { delivered: true };
 }
 
 // Default templates keyed by status — same content as the front-end
@@ -241,9 +206,7 @@ const statusEmailTemplates = {
   PENDING: { subject: 'Update on your request', body: 'Hi {{name}},\n\nYour request is pending action from our side.\n\nBest,\nDream2Fly Team' },
   IN_PROGRESS: { subject: 'We are working on it', body: 'Hi {{name}},\n\nJust a note to let you know we are actively working on this.\n\nBest,\nDream2Fly Team' },
   COMPLETED: { subject: 'This item has been completed', body: 'Hi {{name}},\n\nThis item has been completed on our end.\n\nBest,\nDream2Fly Team' },
-  OVERDUE: { subject: 'Action needed on your application', body: 'Hi {{name}},\n\nWe need action from your side to avoid delays.\n\nBest,\nDream2Fly Team' },
-  PENDING_PARTNER: { subject: 'Waiting on your referring partner', body: 'Hi {{name}},\n\nWe are currently waiting on your referring partner for the next step. We will update you as soon as we hear back.\n\nBest,\nDream2Fly Team' },
-  PENDING_UNIVERSITY: { subject: 'Waiting on the university', body: 'Hi {{name}},\n\nWe are currently waiting to hear back from the university on your application. We will update you as soon as we have news.\n\nBest,\nDream2Fly Team' }
+  OVERDUE: { subject: 'Action needed on your application', body: 'Hi {{name}},\n\nWe need action from your side to avoid delays.\n\nBest,\nDream2Fly Team' }
 };
 
 function renderTemplate(status, name) {
@@ -391,8 +354,10 @@ function wrapPromotionEmailHtml(subject, bodyText, imageUrl, ctaText, ctaUrl){
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7; padding:30px 12px;">
     <tr><td align="center">
       <table width="100%" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);" cellpadding="0" cellspacing="0">
-        <tr><td style="padding:0;">
-          <img src="${SITE_BASE_URL}/images/email/header-banner.jpg" alt="Dream2Fly Consulting Services Limited" width="600" style="display:block; width:100%; max-width:600px; height:auto;">
+        <tr><td style="background:#F6C221; padding:34px 24px 28px; text-align:center;">
+          <img src="${SITE_BASE_URL}/images/email/logo-mark.png" width="52" height="45" alt="Dream2Fly" style="display:block; margin:0 auto 10px;">
+          <div style="font-size:26px; font-weight:800; color:#0B1F4D; letter-spacing:0.5px;">DREAM<span style="color:#A11D24;">2</span>FLY</div>
+          <div style="font-size:11px; font-weight:700; color:#0B1F4D; letter-spacing:2px; margin-top:2px;">CONSULTING SERVICES LIMITED</div>
         </td></tr>
         ${imageUrl ? `<tr><td style="padding:0;"><img src="${imageUrl}" alt="" style="display:block; width:100%; max-width:600px; height:auto;"></td></tr>` : ''}
         <tr><td style="background:linear-gradient(135deg, #0B1F4D, #1e4fa8); padding:22px 28px; text-align:center;">
