@@ -1,4 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
+const { sendPushToUser } = require('./push');
 const prisma = new PrismaClient();
 
 // Creates the in-app alert that populates the bell icon — separate from
@@ -9,6 +10,8 @@ async function createNotification(userId, title, body, type, link) {
     await prisma.notification.create({
       data: { userId, title, body: body || null, type: type || 'GENERAL', link: link || null },
     });
+    // Also buzz the person's phone/browser (no-op if push isn't configured).
+    sendPushToUser(userId, { title, body, link }).catch(() => {});
   } catch (e) {
     // Never let a notification failure break the actual request it's attached to.
     console.error('Could not create notification:', e.message);
