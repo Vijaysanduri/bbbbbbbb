@@ -300,6 +300,18 @@ model PaymentEvent {
 // attention, payments, company announcements. Separate from email: this
 // is what actually populates the bell icon, which previously had nothing
 // behind it at all.
+// One row per browser/phone a person has allowed alerts on. Additive table.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+}
+
 model Notification {
   id        String   @id @default(cuid())
   userId    String
@@ -551,6 +563,7 @@ model User {
   reviewedCareerApplications     CareerApplication[] @relation("CareerApplicationReviewer")
   uploadedMediaAssets            MediaAsset[]
   notifications                  Notification[]
+  pushSubscriptions              PushSubscription[]
   loginSessions                  LoginSession[]
   partnerProfile                 PartnerProfile?
   uploadedPartnerAttachments     PartnerProfileAttachment[]
