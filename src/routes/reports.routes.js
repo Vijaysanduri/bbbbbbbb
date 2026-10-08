@@ -107,4 +107,21 @@ router.get('/partners', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async 
   res.json(directory);
 });
 
+
+// GET /api/reports/partners/:partnerId/referrals — Admin/Super Admin only.
+// Every lead this Channel Partner referred, newest first — what the
+// "Referrals" / "Converted" count links on the Partners directory open
+// into, so Admin can see exactly who each number represents.
+router.get('/partners/:partnerId/referrals', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
+  const leads = await prisma.lead.findMany({
+    where: { referredByPartnerId: req.params.partnerId },
+    orderBy: { dateAdded: 'desc' },
+  });
+  res.json(leads.map(l => ({
+    id: l.id, name: l.name, country: l.country, service: l.service,
+    status: l.status, dateAdded: l.dateAdded, convertedAt: l.convertedAt,
+    contactPhone: l.contactPhone, contactEmail: l.contactEmail,
+  })));
+});
+
 module.exports = router;

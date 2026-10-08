@@ -940,11 +940,47 @@ router.post('/:id/confidential-notes/entries', requireAuth, requireRole('ADMIN',
         const when = new Date(e.createdAt).toLocaleString();
         return (isNew ? '>>> NEW — just added <<<\n' : '') + `${when} — ${who}\n${e.text}`;
       }).join('\n\n----------------------------------------\n\n');
+      // Build a plain-text .txt attachment of the full history, so the
+      // recipient can open one readable file instead of scrolling a long
+      // email body — this is on top of the inline summary below, not a
+      // replacement for it (some mail clients hide attachments in a
+      // preview, so the email still needs to stand on its own).
+      const txtLines = allEntries.map(e => {
+        const isNew = e.id === entry.id;
+        const who = (e.author && e.author.fullName) || 'An admin';
+        const when = new Date(e.createdAt).toLocaleString();
+        const attLine = e.attachmentFileName ? `\n[Attached document on this note: ${e.attachmentFileName}]` : '';
+        return (isNew ? '>>> NEW — just added <<<\n' : '') + `${when} — ${who}\n${e.text}${attLine}`;
+      }).join('\n\n----------------------------------------\n\n');
+      const txtFileContent = `Confidential notes — ${task.related}\nExported ${new Date().toLocaleString()}\n\n${txtLines}`;
+      const txtAttachmentBase64 = Buffer.from(txtFileContent, 'utf-8').toString('base64');
+      const safeTaskName = (task.related || 'task').replace(/[^a-zA-Z0-9]+/g, '-').slice(0, 60);
+
       await sendMail({
         to: alertTo,
         subject: `Confidential note added — ${task.related}`,
-        body: `${authorName} added a confidential note on "${task.related}".\n\nFull confidential note history for this task (most recent first, newest marked):\n\n${historyText}`,
+        body: `${authorName} added a confidential note on "${task.related}".\n\nThe full confidential note history for this task is attached as a text file for easy reading. A summary is also included below.\n\n${historyText}`,
+        attachmentFileName: `confidential-notes-${safeTaskName}.txt`,
+        attachmentBase64: txtAttachmentBase64,
+        attachmentMimeType: 'text/plain',
       });
+
+      // If the note that was just added has its own uploaded document
+      // (e.g. a scanned letter), send that as a second, separate email
+      // with the original file attached — sendMail only supports one
+      // attachment per send, and the original file (which could be a
+      // PDF or image) shouldn't be silently dropped just because the
+      // text summary above already went out.
+      if (entry.attachmentFileName && entry.attachmentData) {
+        await sendMail({
+          to: alertTo,
+          subject: `Confidential note document — ${task.related}`,
+          body: `The document attached to ${authorName}'s confidential note on "${task.related}" is attached here.`,
+          attachmentFileName: entry.attachmentFileName,
+          attachmentBase64: entry.attachmentData,
+          attachmentMimeType: entry.attachmentMimeType || 'application/octet-stream',
+        });
+      }
     } catch (err) {
       console.error('confidential-notes alert email failed:', err);
     }
