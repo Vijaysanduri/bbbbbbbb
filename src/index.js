@@ -40,6 +40,7 @@ const studentDocsRoutes = require('./routes/studentDocs.routes');
 const promotionsRoutes = require('./routes/promotions.routes');
 const paymentsRoutes = require('./routes/payments.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
+const pushRoutes = require('./routes/push.routes');
 const adminSettingsRoutes = require('./routes/adminSettings.routes');
 
 const app = express();
@@ -114,6 +115,7 @@ app.use('/api/student-docs', studentDocsRoutes);
 app.use('/api/promotions', promotionsRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/push', pushRoutes);
 app.use('/api/admin-settings', adminSettingsRoutes);
 
 // Centralized error handler — keeps stack traces out of API responses.
