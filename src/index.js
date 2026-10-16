@@ -118,6 +118,41 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/push', pushRoutes);
 app.use('/api/admin-settings', adminSettingsRoutes);
 
+// ---------------------------------------------------------------------
+// Safety net: mount any route file in src/routes that is not mounted
+// above, at /api/<file-name-in-kebab-case> (countries.routes.js ->
+// /api/countries, caseTypes.routes.js -> /api/case-types, and so on).
+// A broken file is skipped and logged instead of stopping the server.
+// ---------------------------------------------------------------------
+(function mountRemainingRoutes() {
+  const fs = require('fs');
+  const path = require('path');
+  const mounted = new Set((fs.readFileSync(__filename, 'utf8').match(/\.\/routes\/\w+\.routes/g) || []).map(m => m.replace('./routes/', '').replace('.routes', '')));
+  const files = fs.readdirSync(path.join(__dirname, 'routes')).filter(f => f.endsWith('.routes.js'));
+  const present = new Set(files.map(f => f.replace('.routes.js', '')));
+  for (const file of files) {
+    const base = file.replace('.routes.js', '');
+    if (mounted.has(base)) continue;
+    const urlName = base.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+    try {
+      app.use('/api/' + urlName, require('./routes/' + file));
+      console.log('[routes] auto-mounted /api/' + urlName);
+    } catch (err) {
+      console.error('[routes] could not mount ' + file + ': ' + err.message);
+    }
+  }
+  // Admin dropdown lists - only if the project has no file for them.
+  const { makeOptionRouter } = require('./routes/optionLists');
+  [['countries', 'countries', 'countryOption', 'country'],
+   ['services', 'services', 'serviceOption', 'service'],
+   ['caseTypes', 'case-types', 'caseTypeOption', 'case type'],
+   ['loanStatuses', 'loan-statuses', 'loanStatusOption', 'loan status']].forEach(([fileBase, url, delegate, label]) => {
+    if (present.has(fileBase)) return;
+    app.use('/api/' + url, makeOptionRouter(delegate, label));
+    console.log('[routes] built-in list mounted at /api/' + url);
+  });
+})();
+
 // Centralized error handler — keeps stack traces out of API responses.
 // Now also writes every error to the ErrorLog table (in addition to the
 // console.error that already happened, unchanged) so Admin can see
