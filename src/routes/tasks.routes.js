@@ -547,7 +547,7 @@ router.patch('/:id/status', requireAuth, async (req, res) => {
     link: 'tasks',
   }).catch(err => console.error('[tasks/:id/status] notifyRecordWatchers failed:', err.message));
 
-  res.json({ task: updated, email, mailResult });
+  res.json({ task: updated, mailResult });
 });
 
 // PATCH /api/tasks/:id/stage
