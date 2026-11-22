@@ -178,6 +178,8 @@ router.get('/', requireAuth, async (req, res) => {
       history: { orderBy: { date: 'asc' }, include: { actor: { select: { fullName: true } } } },
       assignedEmployee: { select: { id: true, fullName: true } },
       referredByPartner: { select: { id: true, fullName: true } },
+      // Staff-only: lets the task view show when the linked student accepted the Terms & Conditions. Partners never get student details.
+      ...(isPartner ? {} : { student: { select: { fullName: true, email: true, termsAcceptedAt: true } } }),
       applications: { orderBy: { createdAt: 'asc' } },
     },
     orderBy: { due: 'asc' }
@@ -1445,6 +1447,44 @@ router.post('/:id/notify-candidate', requireAuth, async (req, res) => {
   await logActivity(`${task.related} — sent "${template.replace(/_/g, ' ')}" message via ${via}.`, req.user.id);
 
   res.json({ subject, body, mailResult, whatsAppResult });
+});
+
+// PATCH /api/tasks/bulk-assign — Admin/Super Admin/Manager only.
+// Body: { taskIds: [...], assignedEmployeeId } — assigns every listed task
+// to one employee (null = back to "open for anyone"). Same per-task
+// history + system comment as the single assign route, but the employee
+// gets ONE summary email/notification instead of one per task.
+// NOTE: must sit ABOVE the "/:id/assign" route.
+router.patch('/bulk-assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+  const { taskIds, assignedEmployeeId } = req.body;
+  if (!Array.isArray(taskIds) || taskIds.length === 0) return res.status(400).json({ error: 'taskIds is required.' });
+  let employee = null;
+  if (assignedEmployeeId) {
+    employee = await prisma.user.findUnique({ where: { id: assignedEmployeeId } });
+    if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  }
+  const tasks = await prisma.task.findMany({ where: { id: { in: taskIds } } });
+  for (const task of tasks) {
+    await prisma.task.update({ where: { id: task.id }, data: { assignedEmployeeId: assignedEmployeeId || null } });
+    await prisma.taskHistoryEntry.create({
+      data: { taskId: task.id, action: employee ? `Assigned to ${employee.fullName}` : 'Unassigned — now open for anyone', actorId: req.user.id },
+    });
+    await logSystemComment(task.id, req.user.id, employee ? `Reassigned to ${employee.fullName}.` : 'Unassigned — now open for anyone to claim.');
+  }
+  await logActivity(`${tasks.length} task(s) ${employee ? 'bulk-assigned to ' + employee.fullName : 'bulk-unassigned'} by ${req.user.fullName}.`, req.user.id);
+  if (employee && tasks.length) {
+    try {
+      await sendMail({
+        to: employee.email,
+        subject: `${tasks.length} task(s) assigned to you`,
+        body: `Hi ${employee.fullName},\n\nThe following tasks have been assigned to you:\n\n${tasks.map(t => `- ${t.related} — ${t.title}`).join('\n')}\n\nPlease review and follow up.\n\nBest,\nDream2Fly`,
+      });
+    } catch (err) {
+      console.error('[tasks] Bulk assignment email failed:', err.message);
+    }
+    await createNotification(employee.id, 'New tasks assigned', `${tasks.length} task(s) have been assigned to you.`, 'TASK_ASSIGNED', 'tasks');
+  }
+  res.json({ updated: tasks.length });
 });
 
 // PATCH /api/tasks/:id/assign — Admin/Super Admin/Manager only.
