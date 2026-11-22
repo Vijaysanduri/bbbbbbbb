@@ -64,7 +64,13 @@ async function sendInitialWhatsAppGreeting(lead) {
 }
 
 router.post('/public', async (req, res) => {
-  const { name, email, phone, service, country } = req.body;
+  const { name, service, country } = req.body;
+  // Normalise first so spaces/format differences can't dodge the duplicate check
+  // ("name@gmail. com" vs "name@gmail.com", "+91 98765 43210" vs "9876543210").
+  const email = req.body.email ? String(req.body.email).replace(/\s+/g, '').toLowerCase() : req.body.email;
+  const phone = req.body.phone;
+  const phoneDigits = String(phone || '').replace(/\D/g, '');
+  const phoneLast10 = phoneDigits.slice(-10);
   if (!name || !phone || !service) {
     return res.status(400).json({ error: 'name, phone and service are required.' });
   }
@@ -82,6 +88,7 @@ router.post('/public', async (req, res) => {
           OR: [
             ...(email ? [{ contactEmail: { equals: email, mode: 'insensitive' } }] : []),
             ...(phone ? [{ contactPhone: phone }] : []),
+            ...(phoneLast10.length === 10 ? [{ contactPhone: { in: [phoneDigits, phoneLast10, '+91' + phoneLast10, '91' + phoneLast10, '+91 ' + phoneLast10] } }, { contactPhone: { endsWith: phoneLast10 } }] : []),
           ],
         },
         orderBy: { dateAdded: 'desc' },

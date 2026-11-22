@@ -233,6 +233,13 @@ router.post('/:userId/attachments', requireAuth, requireRole('ADMIN', 'SUPER_ADM
 // get from the weekly scheduled check - for when you don't want to
 // wait for that cycle. Blocked if the profile is already complete,
 // since there'd be nothing left to remind them about.
+const REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+function reminderWaitMessage(lastAt) {
+  const next = new Date(new Date(lastAt).getTime() + REMINDER_COOLDOWN_MS);
+  const fmtIst = d => d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+  return `A reminder was already sent at ${fmtIst(new Date(lastAt))}. Another can be sent only after 24 hours — available again from ${fmtIst(next)} (India time).`;
+}
+
 router.post('/:userId/send-reminder', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'), async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
   if (!user || user.role !== 'CHANNEL_PARTNER') return res.status(404).json({ error: 'Partner account not found.' });
@@ -242,6 +249,16 @@ router.post('/:userId/send-reminder', requireAuth, requireRole('ADMIN', 'SUPER_A
   // an error case.
   const profile = await getOrCreateProfile(req.params.userId);
   if (profile.submittedAt) return res.status(400).json({ error: 'This profile is already complete — nothing to remind them about.' });
+  // One reminder per partner every 24 hours (two admins can't both send today).
+  const prevReminderAt = profile.lastReminderAt;
+  const claim = await prisma.partnerProfile.updateMany({
+    where: { id: profile.id, OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: new Date(Date.now() - REMINDER_COOLDOWN_MS) } }] },
+    data: { lastReminderAt: new Date() },
+  });
+  if (claim.count === 0) {
+    const fresh = await prisma.partnerProfile.findUnique({ where: { id: profile.id } });
+    return res.status(429).json({ error: reminderWaitMessage(fresh.lastReminderAt) });
+  }
   try {
     await sendMail({
       to: user.email,
@@ -249,6 +266,7 @@ router.post('/:userId/send-reminder', requireAuth, requireRole('ADMIN', 'SUPER_A
       body: `Hi ${user.fullName},\n\nYour profile still needs a few details before we can send your Channel Partner Agreement — please complete it from your portal.\n\nBest,\nDream2Fly Team`,
     });
   } catch (err) {
+    await prisma.partnerProfile.update({ where: { id: profile.id }, data: { lastReminderAt: prevReminderAt } }); // failed send doesn't use up the 24h slot
     return res.status(502).json({ error: 'Could not send the reminder email: ' + err.message });
   }
   const updated = await prisma.partnerProfile.update({

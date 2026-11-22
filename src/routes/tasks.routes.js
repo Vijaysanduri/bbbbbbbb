@@ -1535,8 +1535,10 @@ router.patch('/:id/assign', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'MA
 // repurposing someone else's login.
 router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'EMPLOYEE', 'COUNSELLOR', 'MANAGER'), async (req, res) => {
   const { password } = req.body;
-  const studentEmail = (req.body.studentEmail || '').trim().toLowerCase();
-  if (!studentEmail || !studentEmail.includes('@')) return res.status(400).json({ error: 'A valid studentEmail is required.' });
+  // Strip ALL spaces (e.g. a typo like "name@gmail. com" used to be accepted
+  // as-is and created a broken second account) and check it looks like an email.
+  const studentEmail = (req.body.studentEmail || '').replace(/\s+/g, '').toLowerCase();
+  if (!studentEmail || !/^[^@]+@[^@]+\.[^@]+$/.test(studentEmail)) return res.status(400).json({ error: 'A valid studentEmail is required.' });
   const task = await prisma.task.findUnique({ where: { id: req.params.id }, include: { student: { select: { email: true } } } });
   if (!task) return res.status(404).json({ error: 'Task not found.' });
   // Without this, resubmitting the form (even by accident, or with a
@@ -1548,6 +1550,28 @@ router.patch('/:id/link-student', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN
   }
 
   let student = await prisma.user.findUnique({ where: { email: studentEmail } });
+  // About to create a BRAND-NEW student account: first make sure this person
+  // doesn't already have one under another email (same phone number, or the
+  // same name). Otherwise the same student ends up with 2-3 accounts and
+  // shows up several times in the Onboarding Form / Students lists. Staff can
+  // still force it (the app asks them to confirm) for a genuinely different
+  // person who happens to share a name.
+  if (!student && !req.body.forceNew) {
+    const digits = v => String(v || '').replace(/\D/g, '').slice(-10);
+    const taskPhone = digits(task.contactPhone);
+    const sameName = await prisma.user.findMany({ where: { role: 'STUDENT', fullName: { equals: (task.related || '').trim(), mode: 'insensitive' } }, select: { email: true } });
+    const phoneMatches = taskPhone.length === 10
+      ? (await prisma.user.findMany({ where: { role: 'STUDENT', phone: { not: null } }, select: { email: true, phone: true } })).filter(u => digits(u.phone) === taskPhone)
+      : [];
+    const existingEmails = [...new Set([...sameName, ...phoneMatches].map(u => u.email))];
+    if (existingEmails.length) {
+      return res.status(409).json({
+        duplicate: true,
+        existing: existingEmails,
+        error: `${task.related} may already have a student account: ${existingEmails.join(', ')}. To avoid duplicates, link one of those emails instead of creating a new account.`,
+      });
+    }
+  }
   let createdNewAccount = false;
   let reactivatedAccount = false;
   let plainPassword = null;

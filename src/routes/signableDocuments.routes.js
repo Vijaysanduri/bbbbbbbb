@@ -34,7 +34,7 @@ router.get('/submissions', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'
     },
     include: {
       user: { select: { id: true, fullName: true, role: true } },
-      document: { select: { id: true, title: true, category: true } },
+      document: { select: { id: true, title: true, category: true, version: true, isCurrentVersion: true } },
       reviewedBy: { select: { fullName: true } },
     },
     orderBy: [{ signedAt: 'desc' }, { uploadedAt: 'desc' }],
@@ -51,6 +51,7 @@ router.get('/submissions', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'
   });
   res.json(filtered.map(a => ({
     documentId: a.documentId, userId: a.userId, title: a.document.title, category: a.document.category,
+    docVersion: a.document.version, docIsCurrent: a.document.isCurrentVersion,
     userName: a.user.fullName, userRole: a.user.role,
     signedByTypedName: a.signedByTypedName, signedAt: a.signedAt,
     uploadedFileName: a.uploadedFileName, uploadedAt: a.uploadedAt,
@@ -209,12 +210,36 @@ router.post('/:id/new-version', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN',
       }
     }
   }
+  // A genuinely NEW version means everyone needs to sign it — including
+  // people who already completed the previous version. (They stay on the
+  // old document for the record and get a fresh pending copy of this one.)
+  let resentToCompleted = 0;
+  const doneAcks = await prisma.signableDocumentAck.findMany({
+    where: { documentId: old.id, OR: [{ signedAt: { not: null } }, { uploadedFileData: { not: null } }] },
+    include: { user: true },
+  });
+  for (const ack of doneAcks) {
+    if (!ack.user || ack.user.active === false) continue;
+    const already = await prisma.signableDocumentAck.findFirst({ where: { documentId: newDoc.id, userId: ack.userId } });
+    if (already) continue;
+    await prisma.signableDocumentAck.create({ data: { documentId: newDoc.id, userId: ack.userId } });
+    resentToCompleted++;
+    try {
+      await sendMail({
+        to: ack.user.email,
+        subject: `Updated: "${newDoc.title}" needs your signature again`,
+        body: `Hi ${ack.user.fullName},\n\n"${newDoc.title}" has been updated to a new version. Please review and sign the latest copy from your portal.\n\nBest,\nDream2Fly`,
+      });
+    } catch (err) {
+      console.error(`[signable-documents] New-version email failed for ${ack.user.email}:`, err.message);
+    }
+  }
   const completedCount = old.acknowledgments ? undefined : await prisma.signableDocumentAck.count({
     where: { documentId: old.id },
   });
 
   await logActivity(`${req.user.fullName} uploaded a new version (v${newDoc.version}) of "${old.title}" — ${migratedCount} pending recipient(s) moved to it, ${completedCount} who already completed it keep their signed copy on record.`, req.user.id);
-  res.status(201).json({ document: newDoc, migratedCount, completedCount });
+  res.status(201).json({ document: newDoc, migratedCount, completedCount, resentToCompleted });
 });
 
 // POST /api/signable-documents — Admin/HR/Super Admin only.
@@ -226,9 +251,54 @@ router.post('/', requireAuth, requireRole('ADMIN', 'SUPER_ADMIN', 'HR'), async (
     return res.status(400).json({ error: 'title, category, fileName and fileData are required.' });
   }
   const resolvedTargetRole = ['EMPLOYEE', 'CHANNEL_PARTNER', 'STUDENT', 'ALL'].includes(targetRole) ? targetRole : 'EMPLOYEE';
-  const doc = await prisma.signableDocument.create({
-    data: { title, category, description: description || null, fileName, mimeType: mimeType || 'application/pdf', fileData, createdById: req.user.id, targetRole: resolvedTargetRole, targetUserId: targetUserId || null },
+  // Duplicate guard: is there already a current document with this exact
+  // title for this same audience?
+  const existing = await prisma.signableDocument.findFirst({
+    where: { title: title.trim(), targetRole: resolvedTargetRole, targetUserId: targetUserId || null, isCurrentVersion: true },
+    orderBy: { createdAt: 'desc' },
   });
+  if (existing && existing.fileData === fileData) {
+    // SAME document uploaded again — don't create a second copy and don't
+    // email anyone who already has it (signed OR still pending). Only
+    // people who have never been given it (e.g. joined since) receive it.
+    const roleFilterD = resolvedTargetRole === 'CHANNEL_PARTNER' ? ['CHANNEL_PARTNER']
+      : resolvedTargetRole === 'STUDENT' ? ['STUDENT']
+      : resolvedTargetRole === 'ALL' ? ['EMPLOYEE', 'COUNSELLOR', 'MANAGER', 'CHANNEL_PARTNER', 'STUDENT']
+      : ['EMPLOYEE', 'COUNSELLOR', 'MANAGER'];
+    const people = targetUserId
+      ? [await prisma.user.findUnique({ where: { id: targetUserId } })].filter(Boolean)
+      : await prisma.user.findMany({ where: { active: true, role: { in: roleFilterD } } });
+    let newlySent = 0, skipped = 0;
+    for (const person of people) {
+      const has = await prisma.signableDocumentAck.findFirst({ where: { documentId: existing.id, userId: person.id } });
+      if (has) { skipped++; continue; }
+      await prisma.signableDocumentAck.create({ data: { documentId: existing.id, userId: person.id } });
+      newlySent++;
+      try {
+        await sendMail({
+          to: person.email,
+          subject: `Action needed: ${existing.title}`,
+          body: `Hi ${person.fullName},\n\nA new ${existing.category === 'AGREEMENT' ? 'agreement' : 'document'} "${existing.title}" needs your signature. Please review and sign it from your portal.\n\nBest,\nDream2Fly`,
+        });
+      } catch (err) {
+        console.error(`[signable-documents] Distribution email failed for ${person.email}:`, err.message);
+      }
+    }
+    return res.status(200).json({ ...existing, fileData: undefined, duplicateOfExisting: true, newlySent, skippedAlreadyHave: skipped });
+  }
+  // Same title + audience but a DIFFERENT file = a new version of it: chain
+  // it to the old one so the list shows v2, and (below) everyone is asked.
+  const versionData = existing
+    ? { version: existing.version + 1, groupKey: existing.groupKey || existing.id, previousVersionId: existing.id }
+    : {};
+  const doc = await prisma.signableDocument.create({
+    data: { title, category, description: description || null, fileName, mimeType: mimeType || 'application/pdf', fileData, createdById: req.user.id, targetRole: resolvedTargetRole, targetUserId: targetUserId || null, ...versionData },
+  });
+  if (existing) {
+    await prisma.signableDocument.update({ where: { id: existing.id }, data: { isCurrentVersion: false, groupKey: existing.groupKey || existing.id } });
+    // The old copy's still-unsigned requests are replaced by this version's.
+    await prisma.signableDocumentAck.deleteMany({ where: { documentId: existing.id, signedAt: null, uploadedFileData: null } });
+  }
 
   // Individually-assigned documents skip the broad role-based recipient
   // list entirely — this one goes to exactly the person picked, e.g.
@@ -335,6 +405,13 @@ router.get('/:id/acks/:userId/certificate', requireAuth, requireRole('ADMIN', 'S
   res.send(pdfBuffer);
 });
 
+const REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+function reminderWaitMessage(lastAt) {
+  const next = new Date(new Date(lastAt).getTime() + REMINDER_COOLDOWN_MS);
+  const fmtIst = d => d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+  return `A reminder was already sent at ${fmtIst(new Date(lastAt))}. Another can be sent only after 24 hours — available again from ${fmtIst(next)} (India time).`;
+}
+
 // POST /api/signable-documents/:id/remind/:userId — Admin/HR/Super Admin
 // only. Manually sends one reminder email (see schema note: no automatic
 // recurring scheduler exists here).
@@ -345,6 +422,18 @@ router.post('/:id/remind/:userId', requireAuth, requireRole('ADMIN', 'SUPER_ADMI
     include: { user: true },
   });
   if (!doc || !ack) return res.status(404).json({ error: 'Not found.' });
+  // One reminder per person per document every 24 hours — so two admins
+  // (or two clicks) can't both send on the same day. The check-and-claim is
+  // a single atomic update, so simultaneous clicks can't both get through.
+  const prevReminderAt = ack.lastReminderAt;
+  const claim = await prisma.signableDocumentAck.updateMany({
+    where: { id: ack.id, OR: [{ lastReminderAt: null }, { lastReminderAt: { lt: new Date(Date.now() - REMINDER_COOLDOWN_MS) } }] },
+    data: { lastReminderAt: new Date() },
+  });
+  if (claim.count === 0) {
+    const fresh = await prisma.signableDocumentAck.findUnique({ where: { id: ack.id } });
+    return res.status(429).json({ error: reminderWaitMessage(fresh.lastReminderAt) });
+  }
   try {
     await sendMail({
       to: ack.user.email,
@@ -353,6 +442,7 @@ router.post('/:id/remind/:userId', requireAuth, requireRole('ADMIN', 'SUPER_ADMI
     });
   } catch (err) {
     console.error(`[signable-documents] Reminder email failed for ${ack.user.email}:`, err.message);
+    await prisma.signableDocumentAck.update({ where: { id: ack.id }, data: { lastReminderAt: prevReminderAt } }); // failed send doesn't use up the 24h slot
     return res.status(502).json({ error: 'Could not send the reminder email: ' + err.message });
   }
   const updated = await prisma.signableDocumentAck.update({
