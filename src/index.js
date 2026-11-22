@@ -195,6 +195,10 @@ app.listen(PORT, () => {
   setInterval(runSlaChecks, 5 * 60 * 1000);
   runSlaChecks(); // also run once at startup, don't wait 5 minutes for the first pass
 
+  // Morning "Today's priorities" email to each employee (9 AM, once a day).
+  const { sendPriorityDigestIfDue } = require('./utils/priorityDigest');
+  setInterval(() => sendPriorityDigestIfDue().catch(e => console.error('priority digest:', e.message)), 5 * 60 * 1000);
+
   // Weekly reminders — document signing and overdue payments. Checks
   // once a day (cheap, no-op most days) and only actually sends once 7+
   // days have passed since someone's last reminder, so it naturally
